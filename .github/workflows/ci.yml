@@ -20,11 +20,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Verify runner tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build clang-format clang-tidy curl tar zip
+          cmake --version
+          ninja --version
+          g++ --version
+          clang-format --version
+          clang-tidy --version
+          curl --version
+          tar --version
+          zip --version
 
       - name: Configure
         run: |
@@ -78,4 +83,3 @@ jobs:
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
           cmd /c "call `"$vcvars`" && cmake --preset windows-msvc-debug && cmake --build --preset build-windows-msvc-debug && ctest --preset test-windows-msvc-debug"
-
