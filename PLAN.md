@@ -109,7 +109,7 @@ Verification completed:
 - BoltStream is designed for GCP deployment from the first phase.
 - Budget boundary: stay inside Google Cloud Free Tier or active Free Trial credits. Before any Terraform apply, verify current official GCP limits because cloud pricing and eligibility can change.
 - Current free-tier deployment target: one non-preemptible `e2-micro` Compute Engine VM in a supported US free-tier region, initially `us-central1-a`, with standard persistent disk kept within the free-tier storage allowance.
-- Primary runtime host: Debian LTS on Compute Engine.
+- Primary runtime host: Ubuntu 24.04 LTS on Compute Engine, matching CI and Docker Linux parity builds.
 - Primary storage path: `/var/lib/boltstream` on persistent disk.
 - Primary install path: `/opt/boltstream/releases/<git-sha>` with `/opt/boltstream/current` pointing to the active release.
 - Runtime manager: systemd service named `boltstream.service`.
@@ -452,7 +452,7 @@ Key implementation changes:
 - Add GCP deployment foundation:
   - Dedicated project `boltstream-r7m5o9ld`, billing account `010A7B-134BD2-8CB391`, account guard `nickaccturk@gmail.com`.
   - Region `us-central1`, zone `us-central1-a`.
-  - Terraform-managed VPC, firewall, service account, Debian VM, 10 GB boot disk, and 20 GB standard persistent data disk mounted at `/var/lib/boltstream`.
+  - Terraform-managed VPC, firewall, service account, Ubuntu 24.04 LTS VM, 10 GB boot disk, and 20 GB standard persistent data disk mounted at `/var/lib/boltstream`.
   - Direct SSH from operator `/32`; broker port `9000` restricted to operator `/32`; admin port `9100` localhost-only.
   - GCS Terraform backend bucket `boltstream-r7m5o9ld-tfstate` with lifecycle cleanup for old versions.
   - Secret Manager metadata for future broker/admin tokens, with secret payloads created outside Terraform state.

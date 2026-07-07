@@ -62,7 +62,7 @@ resource "google_compute_instance" "vm" {
 
   boot_disk {
     initialize_params {
-      image = "debian-cloud/debian-12"
+      image = "ubuntu-os-cloud/ubuntu-2404-lts-amd64"
       size  = 10
       type  = "pd-standard"
     }
@@ -117,4 +117,3 @@ resource "google_secret_manager_secret" "admin_token" {
 
   labels = var.labels
 }
-
