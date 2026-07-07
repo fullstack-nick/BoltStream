@@ -23,13 +23,16 @@ set -euo pipefail
 echo "== systemd =="
 systemctl --no-pager --full status boltstream.service
 echo "== journal =="
-journalctl -u boltstream.service -n 80 --no-pager
+ACTIVE_SINCE="$(systemctl show -p ActiveEnterTimestamp --value boltstream.service)"
+journalctl -u boltstream.service --since "${ACTIVE_SINCE}" -n 80 --no-pager
 echo "== version =="
 curl -fsS http://127.0.0.1:9100/version
 echo
 echo "== data dir =="
 df -h /var/lib/boltstream
 ls -la /var/lib/boltstream
+sudo -u boltstream test -w /var/lib/boltstream
+echo "data dir writable by boltstream"
 echo "== release =="
 readlink -f /opt/boltstream/current
 ls -la /opt/boltstream/current/bin
