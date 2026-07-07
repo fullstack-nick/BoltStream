@@ -1,0 +1,21 @@
+services:
+  boltstream:
+    build:
+      context: .
+      target: runtime
+    command:
+      - "--listen"
+      - "0.0.0.0:9000"
+      - "--admin-listen"
+      - "0.0.0.0:9100"
+      - "--data"
+      - "/var/lib/boltstream"
+    ports:
+      - "9000:9000"
+      - "9100:9100"
+    volumes:
+      - boltstream-data:/var/lib/boltstream
+
+volumes:
+  boltstream-data:
+

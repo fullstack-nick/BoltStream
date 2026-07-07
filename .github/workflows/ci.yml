@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.build_type }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build clang-format clang-tidy curl tar zip
+
+      - name: Configure
+        run: |
+          if [ "${{ matrix.build_type }}" = "Release" ]; then
+            cmake --preset linux-gcc-release
+          else
+            cmake --preset linux-gcc-debug
+          fi
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.build_type }}" = "Release" ]; then
+            cmake --build --preset build-linux-gcc-release
+          else
+            cmake --build --preset build-linux-gcc-debug
+          fi
+
+      - name: Test
+        if: matrix.build_type == 'Debug'
+        run: ctest --preset test-linux-gcc-debug
+
+      - name: Format check
+        if: matrix.build_type == 'Debug'
+        run: pwsh ./scripts/format.ps1
+
+      - name: Package Linux artifact
+        if: matrix.build_type == 'Release'
+        run: |
+          cmake --install build/linux-gcc-release --prefix dist/boltstream
+          mkdir -p artifacts
+          tar -czf "artifacts/boltstream-linux-x86_64-${GITHUB_SHA::12}.tar.gz" -C dist/boltstream .
+
+      - name: Upload Linux artifact
+        if: matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: boltstream-linux-x86_64-${{ github.sha }}
+          path: artifacts/*.tar.gz
+          if-no-files-found: error
+
+  windows-msvc:
+    name: Windows MSVC smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
+          cmd /c "call `"$vcvars`" && cmake --preset windows-msvc-debug && cmake --build --preset build-windows-msvc-debug && ctest --preset test-windows-msvc-debug"
+
