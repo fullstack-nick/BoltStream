@@ -31,7 +31,11 @@ $client.EndConnect($async)
 $client.Close()
 Write-Host "TCP broker port 9000 reachable."
 
-$RemoteCommand = @'
+$RemoteScript = "/tmp/boltstream-smoke-live.sh"
+$LocalScript = Join-Path $env:TEMP "boltstream-smoke-live.sh"
+
+$SmokeScript = @'
+#!/usr/bin/env bash
 set -euo pipefail
 echo "live:"
 curl -fsS http://127.0.0.1:9100/health/live
@@ -43,10 +47,15 @@ echo "version:"
 curl -fsS http://127.0.0.1:9100/version
 echo
 '@
+[System.IO.File]::WriteAllText($LocalScript, $SmokeScript.Replace("`r`n", "`n"), [System.Text.Encoding]::ASCII)
 
-$Output = & $Gcloud compute ssh $InstanceName --project $ProjectId --zone $Zone --command $RemoteCommand
+& $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $LocalScript "${InstanceName}:$RemoteScript"
+if ($LASTEXITCODE -ne 0) { throw "Failed to copy smoke script to $InstanceName." }
+$Output = & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "bash $RemoteScript"
+if ($LASTEXITCODE -ne 0) { throw "Remote smoke script failed on $InstanceName." }
 $Output
 
-if ($ExpectedGitSha -and ($Output -notmatch [regex]::Escape($ExpectedGitSha))) {
+$OutputText = $Output -join "`n"
+if ($ExpectedGitSha -and ($OutputText -notmatch [regex]::Escape($ExpectedGitSha))) {
   throw "Expected git SHA '$ExpectedGitSha' was not found in live /version output."
 }

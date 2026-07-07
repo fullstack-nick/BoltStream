@@ -31,7 +31,7 @@ $RemoteArtifact = "/tmp/boltstream-$GitSha.tar.gz"
 $RemoteScript = "/tmp/boltstream-deploy-$GitSha.sh"
 $LocalScript = Join-Path $env:TEMP "boltstream-deploy-$GitSha.sh"
 
-@"
+$DeployScript = @"
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -84,8 +84,12 @@ sudo systemctl restart boltstream.service
 sleep 2
 systemctl --no-pager --full status boltstream.service
 curl -fsS http://127.0.0.1:9100/version
-"@ | Set-Content -Path $LocalScript -Encoding ASCII
+"@
+[System.IO.File]::WriteAllText($LocalScript, $DeployScript.Replace("`r`n", "`n"), [System.Text.Encoding]::ASCII)
 
-& $Gcloud compute scp --project $ProjectId --zone $Zone $Artifact "${InstanceName}:$RemoteArtifact"
-& $Gcloud compute scp --project $ProjectId --zone $Zone $LocalScript "${InstanceName}:$RemoteScript"
-& $Gcloud compute ssh $InstanceName --project $ProjectId --zone $Zone --command "bash $RemoteScript"
+& $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $Artifact "${InstanceName}:$RemoteArtifact"
+if ($LASTEXITCODE -ne 0) { throw "Failed to copy artifact to $InstanceName." }
+& $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $LocalScript "${InstanceName}:$RemoteScript"
+if ($LASTEXITCODE -ne 0) { throw "Failed to copy deploy script to $InstanceName." }
+& $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "bash $RemoteScript"
+if ($LASTEXITCODE -ne 0) { throw "Remote deployment failed on $InstanceName." }

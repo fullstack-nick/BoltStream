@@ -14,7 +14,11 @@ if ($ActiveAccount -ne $ExpectedAccount) {
   throw "Refusing live inspection. Active account is '$ActiveAccount', expected '$ExpectedAccount'."
 }
 
-$RemoteCommand = @'
+$RemoteScript = "/tmp/boltstream-inspect-live.sh"
+$LocalScript = Join-Path $env:TEMP "boltstream-inspect-live.sh"
+
+$InspectScript = @'
+#!/usr/bin/env bash
 set -euo pipefail
 echo "== systemd =="
 systemctl --no-pager --full status boltstream.service
@@ -30,5 +34,9 @@ echo "== release =="
 readlink -f /opt/boltstream/current
 ls -la /opt/boltstream/current/bin
 '@
+[System.IO.File]::WriteAllText($LocalScript, $InspectScript.Replace("`r`n", "`n"), [System.Text.Encoding]::ASCII)
 
-& $Gcloud compute ssh $InstanceName --project $ProjectId --zone $Zone --command $RemoteCommand
+& $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $LocalScript "${InstanceName}:$RemoteScript"
+if ($LASTEXITCODE -ne 0) { throw "Failed to copy inspection script to $InstanceName." }
+& $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "bash $RemoteScript"
+if ($LASTEXITCODE -ne 0) { throw "Remote inspection script failed on $InstanceName." }

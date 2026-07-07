@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <system_error>
 
@@ -65,10 +66,9 @@ void BrokerServer::start() {
   admin_acceptor_.bind(make_endpoint(options_.admin_listen));
   admin_acceptor_.listen();
 
-  broker_thread_ =
-      std::jthread([this](std::stop_token stop_token) { accept_broker_clients(stop_token); });
-  admin_thread_ =
-      std::jthread([this](std::stop_token stop_token) { accept_admin_clients(stop_token); });
+  stopping_ = false;
+  accept_broker_client();
+  accept_admin_client();
 
   std::cerr << "boltstream-server listening on " << endpoint_to_string(options_.listen)
             << " admin=" << endpoint_to_string(options_.admin_listen)
@@ -76,6 +76,9 @@ void BrokerServer::start() {
 }
 
 void BrokerServer::stop() {
+  if (stopping_.exchange(true)) {
+    return;
+  }
   boost::system::error_code ignored;
   broker_acceptor_.close(ignored);
   admin_acceptor_.close(ignored);
@@ -84,7 +87,12 @@ void BrokerServer::stop() {
 
 void BrokerServer::wait_for_shutdown_signal() {
   boost::asio::signal_set signals(io_, SIGINT, SIGTERM);
-  signals.async_wait([this](const boost::system::error_code&, int) { stop(); });
+  signals.async_wait([this](const boost::system::error_code& error, int signal_number) {
+    if (!error) {
+      std::cerr << "boltstream-server shutting down on signal " << signal_number << '\n';
+      stop();
+    }
+  });
   io_.run();
 }
 
@@ -117,69 +125,81 @@ void BrokerServer::prepare_data_directory() {
   ready_detail_ = "ready";
 }
 
-void BrokerServer::accept_broker_clients(std::stop_token stop_token) {
-  while (!stop_token.stop_requested()) {
-    boost::system::error_code ec;
-    Tcp::socket socket{io_};
-    broker_acceptor_.accept(socket, ec);
+void BrokerServer::accept_broker_client() {
+  auto socket = std::make_shared<Tcp::socket>(io_);
+  broker_acceptor_.async_accept(*socket, [this, socket](const boost::system::error_code& ec) {
     if (ec) {
-      if (broker_acceptor_.is_open()) {
+      if (broker_acceptor_.is_open() && ec != boost::asio::error::operation_aborted) {
         std::cerr << "broker accept error: " << ec.message() << '\n';
       }
       return;
     }
-    handle_broker_client(std::move(socket));
-  }
+    handle_broker_client(std::move(*socket));
+    if (broker_acceptor_.is_open()) {
+      accept_broker_client();
+    }
+  });
 }
 
-void BrokerServer::accept_admin_clients(std::stop_token stop_token) {
-  while (!stop_token.stop_requested()) {
-    boost::system::error_code ec;
-    Tcp::socket socket{io_};
-    admin_acceptor_.accept(socket, ec);
+void BrokerServer::accept_admin_client() {
+  auto socket = std::make_shared<Tcp::socket>(io_);
+  admin_acceptor_.async_accept(*socket, [this, socket](const boost::system::error_code& ec) {
     if (ec) {
-      if (admin_acceptor_.is_open()) {
+      if (admin_acceptor_.is_open() && ec != boost::asio::error::operation_aborted) {
         std::cerr << "admin accept error: " << ec.message() << '\n';
       }
       return;
     }
-    handle_admin_client(std::move(socket));
-  }
+    handle_admin_client(std::move(*socket));
+    if (admin_acceptor_.is_open()) {
+      accept_admin_client();
+    }
+  });
 }
 
 void BrokerServer::handle_broker_client(Tcp::socket socket) {
-  const std::string body = "BoltStream broker protocol starts in Phase 2.\n";
-  boost::system::error_code ignored;
-  boost::asio::write(socket, boost::asio::buffer(body), ignored);
-  socket.shutdown(Tcp::socket::shutdown_both, ignored);
+  auto client = std::make_shared<Tcp::socket>(std::move(socket));
+  auto body = std::make_shared<std::string>("BoltStream broker protocol starts in Phase 2.\n");
+  boost::asio::async_write(*client, boost::asio::buffer(*body),
+                           [client, body](const boost::system::error_code&, std::size_t) {
+                             boost::system::error_code ignored;
+                             client->shutdown(Tcp::socket::shutdown_both, ignored);
+                           });
 }
 
 void BrokerServer::handle_admin_client(Tcp::socket socket) {
-  std::array<char, 2048> buffer{};
-  boost::system::error_code ec;
-  const auto read = socket.read_some(boost::asio::buffer(buffer), ec);
-  if (ec && ec != boost::asio::error::eof) {
-    return;
-  }
+  auto client = std::make_shared<Tcp::socket>(std::move(socket));
+  auto buffer = std::make_shared<std::array<char, 2048>>();
+  client->async_read_some(
+      boost::asio::buffer(*buffer),
+      [this, client, buffer](const boost::system::error_code& ec, std::size_t read) {
+        if (ec && ec != boost::asio::error::eof) {
+          return;
+        }
 
-  const auto request = std::string_view{buffer.data(), read};
-  const auto path = normalize_request_path(request);
-  std::string response;
+        const auto request = std::string_view{buffer->data(), read};
+        const auto path = normalize_request_path(request);
+        auto response = std::make_shared<std::string>();
 
-  if (path == "/health/live") {
-    response = http_response("200 OK", "application/json", health_json("live"));
-  } else if (path == "/health/ready") {
-    response = http_response(ready_ ? "200 OK" : "503 Service Unavailable", "application/json",
-                             health_json(ready_ ? "ready" : "not_ready"));
-  } else if (path == "/version") {
-    response = http_response("200 OK", "application/json", version_json());
-  } else {
-    response = http_response("404 Not Found", "application/json",
-                             "{\"status\":\"not_found\",\"service\":\"boltstream\"}");
-  }
+        if (path == "/health/live") {
+          *response = http_response("200 OK", "application/json", health_json("live"));
+        } else if (path == "/health/ready") {
+          *response =
+              http_response(ready_ ? "200 OK" : "503 Service Unavailable", "application/json",
+                            health_json(ready_ ? "ready" : "not_ready"));
+        } else if (path == "/version") {
+          *response = http_response("200 OK", "application/json", version_json());
+        } else {
+          *response = http_response("404 Not Found", "application/json",
+                                    "{\"status\":\"not_found\",\"service\":\"boltstream\"}");
+        }
 
-  boost::asio::write(socket, boost::asio::buffer(response), ec);
-  socket.shutdown(Tcp::socket::shutdown_both, ec);
+        boost::asio::async_write(*client, boost::asio::buffer(*response),
+                                 [client, response](const boost::system::error_code&, std::size_t) {
+                                   boost::system::error_code ignored;
+                                   client->shutdown(Tcp::socket::shutdown_both, ignored);
+                                 });
+      });
 }
 
 BrokerServer::Tcp::endpoint BrokerServer::make_endpoint(const Endpoint& endpoint) const {

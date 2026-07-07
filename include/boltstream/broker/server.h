@@ -9,7 +9,6 @@
 #include <chrono>
 #include <filesystem>
 #include <string>
-#include <thread>
 
 namespace boltstream::broker {
 
@@ -31,8 +30,8 @@ private:
   using Tcp = boost::asio::ip::tcp;
 
   void prepare_data_directory();
-  void accept_broker_clients(std::stop_token stop_token);
-  void accept_admin_clients(std::stop_token stop_token);
+  void accept_broker_client();
+  void accept_admin_client();
   void handle_broker_client(Tcp::socket socket);
   void handle_admin_client(Tcp::socket socket);
 
@@ -45,13 +44,12 @@ private:
   BuildInfo build_info_;
   std::string startup_time_utc_;
   std::atomic_bool ready_{false};
+  std::atomic_bool stopping_{false};
   std::string ready_detail_{"starting"};
 
   boost::asio::io_context io_;
   Tcp::acceptor broker_acceptor_;
   Tcp::acceptor admin_acceptor_;
-  std::jthread broker_thread_;
-  std::jthread admin_thread_;
 };
 
 std::string utc_now_iso8601();
