@@ -9,12 +9,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $ExpectedAccount = "nickaccturk@gmail.com"
-$ActiveAccount = (gcloud auth list --filter=status:ACTIVE --format="value(account)").Trim()
+$Gcloud = "gcloud.cmd"
+$ActiveAccount = (& $Gcloud auth list --filter=status:ACTIVE --format="value(account)").Trim()
 if ($ActiveAccount -ne $ExpectedAccount) {
   throw "Refusing live smoke. Active account is '$ActiveAccount', expected '$ExpectedAccount'."
 }
 
-$ExternalIp = (gcloud compute instances describe $InstanceName --project $ProjectId --zone $Zone --format="value(networkInterfaces[0].accessConfigs[0].natIP)").Trim()
+$ExternalIp = (& $Gcloud compute instances describe $InstanceName --project $ProjectId --zone $Zone --format="value(networkInterfaces[0].accessConfigs[0].natIP)").Trim()
 if (-not $ExternalIp) {
   throw "Could not determine VM external IP."
 }
@@ -43,10 +44,9 @@ curl -fsS http://127.0.0.1:9100/version
 echo
 '@
 
-$Output = gcloud compute ssh $InstanceName --project $ProjectId --zone $Zone --command $RemoteCommand
+$Output = & $Gcloud compute ssh $InstanceName --project $ProjectId --zone $Zone --command $RemoteCommand
 $Output
 
 if ($ExpectedGitSha -and ($Output -notmatch [regex]::Escape($ExpectedGitSha))) {
   throw "Expected git SHA '$ExpectedGitSha' was not found in live /version output."
 }
-

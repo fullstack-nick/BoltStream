@@ -8,7 +8,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $ExpectedAccount = "nickaccturk@gmail.com"
-$ActiveAccount = (gcloud auth list --filter=status:ACTIVE --format="value(account)").Trim()
+$Gcloud = "gcloud.cmd"
+$ActiveAccount = (& $Gcloud auth list --filter=status:ACTIVE --format="value(account)").Trim()
 if ($ActiveAccount -ne $ExpectedAccount) {
   throw "Refusing live inspection. Active account is '$ActiveAccount', expected '$ExpectedAccount'."
 }
@@ -30,5 +31,4 @@ readlink -f /opt/boltstream/current
 ls -la /opt/boltstream/current/bin
 '@
 
-gcloud compute ssh $InstanceName --project $ProjectId --zone $Zone --command $RemoteCommand
-
+& $Gcloud compute ssh $InstanceName --project $ProjectId --zone $Zone --command $RemoteCommand

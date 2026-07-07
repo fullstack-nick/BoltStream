@@ -10,7 +10,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $ExpectedAccount = "nickaccturk@gmail.com"
-$ActiveAccount = (gcloud auth list --filter=status:ACTIVE --format="value(account)").Trim()
+$Gcloud = "gcloud.cmd"
+$ActiveAccount = (& $Gcloud auth list --filter=status:ACTIVE --format="value(account)").Trim()
 if ($ActiveAccount -ne $ExpectedAccount) {
   throw "Refusing to deploy. Active account is '$ActiveAccount', expected '$ExpectedAccount'."
 }
@@ -85,7 +86,6 @@ systemctl --no-pager --full status boltstream.service
 curl -fsS http://127.0.0.1:9100/version
 "@ | Set-Content -Path $LocalScript -Encoding ASCII
 
-gcloud compute scp --project $ProjectId --zone $Zone $Artifact "${InstanceName}:$RemoteArtifact"
-gcloud compute scp --project $ProjectId --zone $Zone $LocalScript "${InstanceName}:$RemoteScript"
-gcloud compute ssh $InstanceName --project $ProjectId --zone $Zone --command "bash $RemoteScript"
-
+& $Gcloud compute scp --project $ProjectId --zone $Zone $Artifact "${InstanceName}:$RemoteArtifact"
+& $Gcloud compute scp --project $ProjectId --zone $Zone $LocalScript "${InstanceName}:$RemoteScript"
+& $Gcloud compute ssh $InstanceName --project $ProjectId --zone $Zone --command "bash $RemoteScript"

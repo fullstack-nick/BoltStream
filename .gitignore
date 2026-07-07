@@ -26,6 +26,8 @@ Testing/
 .terraform/
 terraform.tfstate
 terraform.tfstate.*
+tfplan
+*.tfplan
 *.tfvars
 *.tfvars.json
 *.auto.tfvars
