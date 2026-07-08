@@ -280,6 +280,7 @@ try {
   Assert-LogContains $Stderr '"error_code":"invalid_length"'
 
   Write-Host "Phase 6 backpressure/robustness smoke passed."
+  exit 0
 } finally {
   if ($longPollProcess -and -not $longPollProcess.HasExited) {
     Stop-Process -Id $longPollProcess.Id -Force
