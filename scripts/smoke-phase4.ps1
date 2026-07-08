@@ -98,6 +98,9 @@ $AdminPort = Get-FreePort
 $DataDir = Join-Path ([System.IO.Path]::GetTempPath()) "boltstream-phase4-smoke-$([Guid]::NewGuid())"
 $Stdout = Join-Path $env:TEMP "boltstream-phase4-smoke.out"
 $Stderr = Join-Path $env:TEMP "boltstream-phase4-smoke.err"
+$HadBrokerToken = Test-Path Env:\BOLTSTREAM_BROKER_TOKEN
+$PreviousBrokerToken = $env:BOLTSTREAM_BROKER_TOKEN
+$env:BOLTSTREAM_BROKER_TOKEN = "phase4-smoke-token-$([Guid]::NewGuid())"
 Remove-Item -Recurse -Force -LiteralPath $DataDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 Remove-Item -Force -LiteralPath $Stdout, $Stderr -ErrorAction SilentlyContinue
@@ -156,4 +159,9 @@ try {
 } finally {
   Stop-BoltStreamServer -Process $serverProcess
   Remove-Item -Recurse -Force -LiteralPath $DataDir -ErrorAction SilentlyContinue
+  if ($HadBrokerToken) {
+    $env:BOLTSTREAM_BROKER_TOKEN = $PreviousBrokerToken
+  } else {
+    Remove-Item Env:\BOLTSTREAM_BROKER_TOKEN -ErrorAction SilentlyContinue
+  }
 }

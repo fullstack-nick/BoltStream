@@ -259,7 +259,7 @@ int main(int argc, char** argv) {
           return;
         }
 
-        auto send_fetch = [&] {
+        auto send_fetch = [&, client] {
           client->async_fetch(
               options.topic, options.from,
               [&](const boost::system::error_code& request_ec, boltstream::protocol::Frame frame) {

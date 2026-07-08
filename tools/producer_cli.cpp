@@ -247,7 +247,7 @@ int main(int argc, char** argv) {
           return;
         }
 
-        auto send_produce = [&] {
+        auto send_produce = [&, client] {
           client->async_produce(
               options.topic, key_bytes, message_bytes,
               [&](const boost::system::error_code& request_ec, boltstream::protocol::Frame frame) {
