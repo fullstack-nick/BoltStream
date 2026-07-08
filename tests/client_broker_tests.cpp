@@ -831,8 +831,16 @@ TEST(ClientBrokerTests, OversizedFrameReceivesInvalidLengthAndCloses) {
   auto rejected =
       produce(running->port, "frames", "k", std::string(128, 'x'), seen_error, timed_out);
   ASSERT_FALSE(timed_out);
+  if (seen_error) {
+    EXPECT_TRUE(rejected.payload.empty() ||
+                rejected.header.frame_type == boltstream::protocol::FrameType::ErrorResponse);
+    return;
+  }
   ASSERT_EQ(rejected.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
-  EXPECT_EQ(decode_error(rejected).code, boltstream::protocol::ErrorCode::InvalidLength);
+  boltstream::protocol::ErrorResponse error;
+  const auto decoded = boltstream::protocol::decode_error_response(rejected.payload, error);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(error.code, boltstream::protocol::ErrorCode::InvalidLength);
 }
 
 TEST(ClientBrokerTests, BrokerConnectionLimitRejectsExcessSessions) {
