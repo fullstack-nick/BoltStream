@@ -159,6 +159,21 @@ TEST(ProtocolTests, DecodesUnauthorizedErrorResponsePayload) {
   EXPECT_EQ(boltstream::protocol::error_code_name(response.code), "unauthorized");
 }
 
+TEST(ProtocolTests, OverloadedErrorIsRetryable) {
+  const auto payload = boltstream::protocol::encode_error_response(
+      boltstream::protocol::ErrorCode::Overloaded, "append queue is full");
+  boltstream::protocol::ErrorResponse response;
+
+  const auto decoded = boltstream::protocol::decode_error_response(payload, response);
+
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(response.code, boltstream::protocol::ErrorCode::Overloaded);
+  EXPECT_EQ(boltstream::protocol::error_code_name(response.code), "overloaded");
+  EXPECT_TRUE(boltstream::protocol::is_retryable_error(response.code));
+  EXPECT_FALSE(
+      boltstream::protocol::is_retryable_error(boltstream::protocol::ErrorCode::MalformedPayload));
+}
+
 TEST(ProtocolTests, PhaseFourPayloadsRoundTrip) {
   const auto auth_request_payload = boltstream::protocol::encode_auth_request("secret-token");
   boltstream::protocol::AuthRequest auth_request;

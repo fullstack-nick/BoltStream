@@ -23,6 +23,10 @@ struct ServerOptions {
   std::uint32_t max_fetch_bytes{1024 * 1024};
   std::uint32_t max_topic_partitions{128};
   std::uint32_t max_fetch_wait_ms{30000};
+  std::uint32_t max_append_queue_depth{32};
+  std::uint32_t append_workers{2};
+  std::uint32_t max_broker_connections{128};
+  std::uint32_t max_long_poll_waiters{128};
 };
 
 struct ParsedServerOptions {

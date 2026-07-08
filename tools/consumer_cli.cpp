@@ -242,10 +242,15 @@ int response_exit_code(const boltstream::protocol::Frame& frame,
     return 1;
   }
 
+  const auto retryable = boltstream::protocol::is_retryable_error(response.code);
   std::cout << "{\"status\":\"" << boltstream::protocol::error_code_name(response.code)
             << "\",\"error_code\":\"" << boltstream::protocol::error_code_name(response.code)
-            << "\",\"message\":\"" << json_escape(response.message)
+            << "\",\"retryable\":" << (retryable ? "true" : "false") << ",\"message\":\""
+            << json_escape(response.message)
             << "\",\"correlation_id\":" << frame.header.correlation_id << "}\n";
+  if (retryable) {
+    return 5;
+  }
   return response.code == boltstream::protocol::ErrorCode::NotImplemented ? 3 : 1;
 }
 

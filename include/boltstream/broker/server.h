@@ -50,6 +50,7 @@ private:
   std::string startup_time_utc_;
   std::atomic_bool ready_{false};
   std::atomic_bool stopping_{false};
+  std::atomic<std::uint32_t> active_broker_sessions_{0};
   std::string ready_detail_{"starting"};
 
   boost::asio::io_context io_;

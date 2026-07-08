@@ -2,11 +2,11 @@
 
 BoltStream is a C++20 low-latency event streaming engine: a Kafka-inspired broker built from scratch to demonstrate Linux networking, durable storage, concurrency, testing, performance measurement, and cloud-native deployment.
 
-Phase 5 adds explicit topic creation, manifest-backed multi-partition topics,
-broker-side partition routing, durable consumer group offset commits, committed
-resume, and long-poll fetch over the binary TCP protocol.
+Phase 6 adds bounded broker resource use, retryable overload responses,
+structured JSON broker logs, per-partition append backpressure, fetch response
+caps, and deterministic abuse-case coverage over the binary TCP protocol.
 
-## Current Phase 5 Surface
+## Current Phase 6 Surface
 
 - `boltstream-server` opens broker TCP port `9000`.
 - Admin HTTP listens on `127.0.0.1:9100`.
@@ -19,6 +19,9 @@ resume, and long-poll fetch over the binary TCP protocol.
 - `boltstream-consumer` fetches durable records from `beginning`, `latest`, `committed`, or an explicit offset for a chosen partition.
 - `boltstream-consumer --group GROUP --commit` commits the returned partition `next_offset` to a durable group offset log.
 - Long-poll fetch is available with `boltstream-consumer --wait-ms MS`.
+- Append queues are bounded per partition and return retryable `overloaded` errors instead of growing without limit.
+- Long-poll waiter state, broker sessions, frame sizes, fetch records, and fetch bytes are bounded by server options.
+- Broker runtime logs are structured JSON lines with event names, correlation ids, error codes, retryable flags, queue/waiter state, and request duration.
 - `boltstream-logtool` remains available for direct append, read, and recovery inspection of durable records.
 - `BOLTSTREAM_BROKER_TOKEN` enables broker-protocol auth; local development may omit it, while GCP deploys require it.
 - `boltstream-bench` remains a stable benchmark shell until the benchmark phase.
@@ -68,6 +71,7 @@ For a repeatable local smoke:
 
 ```powershell
 .\scripts\smoke-phase5.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase6.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
 ```
@@ -97,4 +101,5 @@ Durable acceptance records live under `proof/`. Phase 1 is recorded in
 [proof/phase-3.md](proof/phase-3.md) after local checks, GitHub push, CI artifact,
 GCP deploy, live storage calls, SSH log/data-file inspection, and runtime version
 verification pass. Phase 4 evidence is recorded in [proof/phase-4.md](proof/phase-4.md).
-Phase 5 evidence is recorded in [proof/phase-5.md](proof/phase-5.md).
+Phase 5 evidence is recorded in [proof/phase-5.md](proof/phase-5.md). Phase 6 evidence
+is recorded in [proof/phase-6.md](proof/phase-6.md).

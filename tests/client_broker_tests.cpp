@@ -89,7 +89,9 @@ std::filesystem::path temp_path(std::string_view prefix) {
           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
 }
 
-std::unique_ptr<RunningServer> start_server(std::filesystem::path data_dir = {}) {
+std::unique_ptr<RunningServer>
+start_server(std::filesystem::path data_dir = {},
+             std::function<void(boltstream::broker::ServerOptions&)> configure = {}) {
   auto running = std::make_unique<RunningServer>();
   if (data_dir.empty()) {
     running->data_dir = temp_path("boltstream-phase4-test");
@@ -104,6 +106,9 @@ std::unique_ptr<RunningServer> start_server(std::filesystem::path data_dir = {})
   options.admin_listen = {"127.0.0.1", 0};
   options.data_dir = running->data_dir;
   options.max_frame_bytes = boltstream::protocol::kDefaultMaxFrameBytes;
+  if (configure) {
+    configure(options);
+  }
 
   running->server =
       std::make_unique<boltstream::broker::BrokerServer>(options, boltstream::current_build_info());
@@ -496,6 +501,141 @@ TEST(ClientBrokerTests, LongPollFetchCompletesAfterDelayedProduce) {
   ASSERT_TRUE(decoded.ok) << decoded.message;
   ASSERT_EQ(response.records.size(), 1U);
   EXPECT_EQ(text(response.records[0].message), "after-wait");
+}
+
+TEST(ClientBrokerTests, AppendQueueDepthZeroRejectsProduceWithoutAppending) {
+  const auto running = start_server({}, [](auto& options) { options.max_append_queue_depth = 0; });
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "overload", 1, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
+  auto rejected = produce(running->port, "overload", "AAPL", "100", seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(rejected.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
+  const auto error = decode_error(rejected);
+  EXPECT_EQ(error.code, boltstream::protocol::ErrorCode::Overloaded);
+  EXPECT_TRUE(boltstream::protocol::is_retryable_error(error.code));
+
+  auto fetched = fetch(running->port, "overload", "beginning", seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::FetchResponse response;
+  const auto decoded = boltstream::protocol::decode_fetch_response(fetched.payload, response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_TRUE(response.records.empty());
+  EXPECT_EQ(response.next_offset, 0U);
+}
+
+TEST(ClientBrokerTests, LongPollWaiterLimitRejectsOnlyWaitingFetches) {
+  const auto running = start_server({}, [](auto& options) { options.max_long_poll_waiters = 0; });
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "waitlimit", 1, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+
+  auto waiting =
+      fetch_partition(running->port, "waitlimit", 0, "latest", "", 1000, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(waiting.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
+  EXPECT_EQ(decode_error(waiting).code, boltstream::protocol::ErrorCode::Overloaded);
+
+  auto immediate =
+      fetch_partition(running->port, "waitlimit", 0, "latest", "", 0, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(immediate.header.frame_type, boltstream::protocol::FrameType::FetchResponse);
+  boltstream::protocol::FetchResponse response;
+  const auto decoded = boltstream::protocol::decode_fetch_response(immediate.payload, response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_TRUE(response.records.empty());
+}
+
+TEST(ClientBrokerTests, FetchTruncationReturnsResumeNextOffset) {
+  const auto running = start_server({}, [](auto& options) {
+    options.max_fetch_records = 10;
+    options.max_fetch_bytes = 80;
+  });
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "trades", 1, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  for (std::string_view value : {"one", "two", "three"}) {
+    auto produced = produce(running->port, "trades", "k", value, seen_error, timed_out);
+    ASSERT_FALSE(timed_out);
+    ASSERT_FALSE(seen_error) << seen_error.message();
+    ASSERT_EQ(produced.header.frame_type, boltstream::protocol::FrameType::ProduceResponse);
+  }
+
+  auto first = fetch(running->port, "trades", "beginning", seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::FetchResponse first_response;
+  auto decoded = boltstream::protocol::decode_fetch_response(first.payload, first_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  ASSERT_EQ(first_response.records.size(), 1U);
+  EXPECT_EQ(first_response.records[0].offset, 0U);
+  EXPECT_EQ(first_response.next_offset, 1U);
+
+  auto second = fetch(running->port, "trades", "1", seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::FetchResponse second_response;
+  decoded = boltstream::protocol::decode_fetch_response(second.payload, second_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  ASSERT_EQ(second_response.records.size(), 1U);
+  EXPECT_EQ(second_response.records[0].offset, 1U);
+  EXPECT_EQ(second_response.next_offset, 2U);
+}
+
+TEST(ClientBrokerTests, OversizedFrameReceivesInvalidLengthAndCloses) {
+  const auto running = start_server({}, [](auto& options) { options.max_frame_bytes = 96; });
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "frames", 1, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+
+  auto rejected =
+      produce(running->port, "frames", "k", std::string(128, 'x'), seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(rejected.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
+  EXPECT_EQ(decode_error(rejected).code, boltstream::protocol::ErrorCode::InvalidLength);
+}
+
+TEST(ClientBrokerTests, BrokerConnectionLimitRejectsExcessSessions) {
+  const auto running = start_server({}, [](auto& options) { options.max_broker_connections = 1; });
+
+  boost::asio::io_context hold_io;
+  boost::asio::ip::tcp::socket hold_socket{hold_io};
+  hold_socket.connect({boost::asio::ip::make_address("127.0.0.1"), running->port});
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+  auto frame = run_single_request(
+      running->port,
+      [](boltstream::client::AsyncClient& client,
+         std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_health(std::move(done));
+      },
+      seen_error, timed_out);
+
+  hold_socket.close();
+  EXPECT_FALSE(timed_out);
+  EXPECT_TRUE(seen_error ||
+              frame.header.frame_type == boltstream::protocol::FrameType::ErrorResponse);
 }
 
 TEST(ClientBrokerTests, InvalidTopicIsRejected) {

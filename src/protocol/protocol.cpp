@@ -201,9 +201,13 @@ std::string_view error_code_name(ErrorCode error_code) {
     return "invalid_group";
   case ErrorCode::InvalidOffset:
     return "invalid_offset";
+  case ErrorCode::Overloaded:
+    return "overloaded";
   }
   return "unknown_error";
 }
+
+bool is_retryable_error(ErrorCode error_code) { return error_code == ErrorCode::Overloaded; }
 
 bool is_request_type(FrameType frame_type) {
   switch (frame_type) {

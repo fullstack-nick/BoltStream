@@ -607,12 +607,20 @@ Deliverables:
 - Max frame size and max fetch response size enforcement.
 - Deterministic overload responses.
 - Structured logging with correlation ids.
+- Locked defaults:
+  - `--max-append-queue-depth 32` per partition; `0` is valid for deterministic overload proof.
+  - `--append-workers 2`.
+  - `--max-broker-connections 128`.
+  - `--max-long-poll-waiters 128`; `0` rejects waiting fetches while immediate fetch still works.
+- Retryable protocol error `overloaded = 16` with CLI error JSON field `"retryable": true` and exit code `5`.
+- `FetchResponse.next_offset` is the consumer resume offset, not the partition high watermark when a response is truncated.
 
 Acceptance:
 
 - Slow consumers do not cause unbounded memory growth.
 - Overloaded producers receive retryable errors.
 - Abuse cases are covered by integration tests.
+- Local checks, CI artifact, GCP deploy, live authenticated smoke, constrained live overload proof, structured journal evidence, and `proof/phase-6.md` are required before the phase is complete.
 
 ### Phase 7: Coordinated Consumer Groups
 

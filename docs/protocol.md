@@ -1,9 +1,9 @@
 # BoltStream Protocol
 
 BoltStream broker/client traffic uses a custom binary TCP protocol. Protocol version
-`2` validates framed requests, preserves correlation ids, and supports explicit topic
-creation, multi-partition produce/fetch, durable consumer offset commits, and long-poll
-fetch.
+`2` validates framed requests, preserves correlation ids, supports explicit topic
+creation, multi-partition produce/fetch, durable consumer offset commits, long-poll
+fetch, and retryable overload responses.
 
 ## Frame Header
 
@@ -78,8 +78,10 @@ Payloads:
 
 `FetchRequest.from` supports `beginning`, `latest`, `committed`, or an unsigned offset
 encoded as decimal ASCII. `committed` requires a non-empty group. Long-poll waits only
-when the resolved fetch offset equals the partition `next_offset`; otherwise the broker
-returns immediately.
+when the resolved fetch offset equals the partition high watermark; otherwise the broker
+returns immediately. `FetchResponse.next_offset` is the resume offset for the next fetch:
+when a response is truncated by record or byte caps, it is one past the final returned
+record. Use metadata for the partition high watermark.
 
 ## Error Codes
 
@@ -100,6 +102,7 @@ returns immediately.
 | 13 | `invalid_partition` |
 | 14 | `invalid_group` |
 | 15 | `invalid_offset` |
+| 16 | `overloaded` |
 
 Malformed or unsafe frames receive a structured `ErrorResponse` when possible and then
 the broker closes the connection. Valid but unsupported operations keep the connection
@@ -108,6 +111,10 @@ open and return `not_implemented` with the original correlation id. If
 successful `AuthRequest`; unauthorized requests return `unauthorized` and close the
 connection. Create-topic and offset commit are protected by the same auth gate. Health
 remains unauthenticated.
+
+`overloaded` is retryable. The broker returns it when bounded append queues or long-poll
+waiter slots are exhausted. The producer, consumer, and admin CLIs include
+`"retryable": true` in overload error JSON and exit with code `5`.
 
 ## CLI Behavior
 

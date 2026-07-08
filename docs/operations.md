@@ -21,7 +21,12 @@ Use `windows-msvc-debug` for the MSVC path and `windows-clang-debug` for the LLV
   --data .\data `
   --max-frame-bytes 1048576 `
   --max-fetch-records 100 `
-  --max-fetch-bytes 1048576
+  --max-fetch-bytes 1048576 `
+  --max-fetch-wait-ms 30000 `
+  --max-append-queue-depth 32 `
+  --append-workers 2 `
+  --max-broker-connections 128 `
+  --max-long-poll-waiters 128
 ```
 
 Admin endpoints:
@@ -61,9 +66,17 @@ environment variable for the CLI before calling produce/fetch.
 Repeatable storage smoke:
 
 ```powershell
+.\scripts\smoke-phase6.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
 ```
+
+Backpressure behavior:
+
+- Append overload returns protocol error `overloaded`, `"retryable": true`, and CLI exit code `5`.
+- `--max-append-queue-depth 0` rejects produces without appending records.
+- `--max-long-poll-waiters 0` rejects waiting fetches while immediate fetches still work.
+- Broker runtime logs are JSON lines with event names, correlation ids, retryable flags, queue/waiter state, and request duration.
 
 ## Linux Service Layout
 

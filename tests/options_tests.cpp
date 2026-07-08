@@ -23,6 +23,10 @@ TEST(OptionsTests, DefaultsMatchCurrentContract) {
   EXPECT_EQ(parsed.options.max_fetch_bytes, 1024U * 1024U);
   EXPECT_EQ(parsed.options.max_topic_partitions, 128U);
   EXPECT_EQ(parsed.options.max_fetch_wait_ms, 30000U);
+  EXPECT_EQ(parsed.options.max_append_queue_depth, 32U);
+  EXPECT_EQ(parsed.options.append_workers, 2U);
+  EXPECT_EQ(parsed.options.max_broker_connections, 128U);
+  EXPECT_EQ(parsed.options.max_long_poll_waiters, 128U);
 }
 
 TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
@@ -43,6 +47,14 @@ TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
       std::string_view{"8"},
       std::string_view{"--max-fetch-wait-ms"},
       std::string_view{"500"},
+      std::string_view{"--max-append-queue-depth"},
+      std::string_view{"0"},
+      std::string_view{"--append-workers"},
+      std::string_view{"4"},
+      std::string_view{"--max-broker-connections"},
+      std::string_view{"16"},
+      std::string_view{"--max-long-poll-waiters"},
+      std::string_view{"0"},
   };
 
   const auto parsed = parse_server_options(args);
@@ -58,6 +70,10 @@ TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
   EXPECT_EQ(parsed.options.max_fetch_bytes, 2048U);
   EXPECT_EQ(parsed.options.max_topic_partitions, 8U);
   EXPECT_EQ(parsed.options.max_fetch_wait_ms, 500U);
+  EXPECT_EQ(parsed.options.max_append_queue_depth, 0U);
+  EXPECT_EQ(parsed.options.append_workers, 4U);
+  EXPECT_EQ(parsed.options.max_broker_connections, 16U);
+  EXPECT_EQ(parsed.options.max_long_poll_waiters, 0U);
 }
 
 TEST(OptionsTests, ParsesPortShortcut) {
@@ -77,4 +93,22 @@ TEST(OptionsTests, RejectsInvalidPort) {
 
   EXPECT_FALSE(parsed.ok());
   EXPECT_NE(parsed.error.find("invalid --port"), std::string::npos);
+}
+
+TEST(OptionsTests, RejectsZeroAppendWorkers) {
+  constexpr std::array args{std::string_view{"--append-workers"}, std::string_view{"0"}};
+
+  const auto parsed = parse_server_options(args);
+
+  EXPECT_FALSE(parsed.ok());
+  EXPECT_NE(parsed.error.find("invalid --append-workers"), std::string::npos);
+}
+
+TEST(OptionsTests, UsageDocumentsPhaseSixDefaults) {
+  const auto usage = boltstream::broker::server_usage();
+
+  EXPECT_NE(usage.find("--max-append-queue-depth 32"), std::string::npos);
+  EXPECT_NE(usage.find("--append-workers 2"), std::string::npos);
+  EXPECT_NE(usage.find("--max-broker-connections 128"), std::string::npos);
+  EXPECT_NE(usage.find("--max-long-poll-waiters 128"), std::string::npos);
 }

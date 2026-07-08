@@ -4,6 +4,7 @@
 #include "boltstream/storage/offset_store.h"
 #include "boltstream/storage/partition_log.h"
 
+#include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/write.hpp>
@@ -12,8 +13,10 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -27,6 +30,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
+#include <utility>
 
 namespace boltstream::broker {
 
@@ -84,6 +89,88 @@ std::string json_escape(std::string_view value) {
     }
   }
   return out.str();
+}
+
+struct StructuredLogFields {
+  StructuredLogFields(std::string level_in, std::string event_in, std::string remote_in = {},
+                      std::string frame_type_in = {}, std::string error_code_in = {},
+                      std::string message_in = {},
+                      std::optional<std::uint64_t> correlation_id_in = std::nullopt,
+                      std::optional<std::uint32_t> payload_bytes_in = std::nullopt,
+                      std::optional<bool> retryable_in = std::nullopt,
+                      std::optional<std::uint32_t> append_queue_depth_in = std::nullopt,
+                      std::optional<std::uint32_t> waiter_count_in = std::nullopt,
+                      std::optional<std::uint64_t> request_duration_ms_in = std::nullopt)
+      : level(std::move(level_in)), event(std::move(event_in)), remote(std::move(remote_in)),
+        frame_type(std::move(frame_type_in)), error_code(std::move(error_code_in)),
+        message(std::move(message_in)), correlation_id(correlation_id_in),
+        payload_bytes(payload_bytes_in), retryable(retryable_in),
+        append_queue_depth(append_queue_depth_in), waiter_count(waiter_count_in),
+        request_duration_ms(request_duration_ms_in) {}
+
+  std::string level{"info"};
+  std::string event;
+  std::string remote;
+  std::string frame_type;
+  std::string error_code;
+  std::string message;
+  std::optional<std::uint64_t> correlation_id;
+  std::optional<std::uint32_t> payload_bytes;
+  std::optional<bool> retryable;
+  std::optional<std::uint32_t> append_queue_depth;
+  std::optional<std::uint32_t> waiter_count;
+  std::optional<std::uint64_t> request_duration_ms;
+};
+
+std::mutex& structured_log_mutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+void write_structured_log(const StructuredLogFields& fields) {
+  std::ostringstream out;
+  out << "{";
+  out << "\"timestamp\":\"" << utc_now_iso8601() << "\"";
+  out << ",\"level\":\"" << json_escape(fields.level) << "\"";
+  out << ",\"event\":\"" << json_escape(fields.event) << "\"";
+  if (!fields.remote.empty()) {
+    out << ",\"remote\":\"" << json_escape(fields.remote) << "\"";
+  }
+  if (fields.correlation_id) {
+    out << ",\"correlation_id\":" << *fields.correlation_id;
+  }
+  if (!fields.frame_type.empty()) {
+    out << ",\"frame_type\":\"" << json_escape(fields.frame_type) << "\"";
+  }
+  if (fields.payload_bytes) {
+    out << ",\"payload_bytes\":" << *fields.payload_bytes;
+  }
+  if (!fields.error_code.empty()) {
+    out << ",\"error_code\":\"" << json_escape(fields.error_code) << "\"";
+  }
+  if (fields.retryable) {
+    out << ",\"retryable\":" << (*fields.retryable ? "true" : "false");
+  }
+  if (fields.append_queue_depth) {
+    out << ",\"append_queue_depth\":" << *fields.append_queue_depth;
+  }
+  if (fields.waiter_count) {
+    out << ",\"waiter_count\":" << *fields.waiter_count;
+  }
+  if (fields.request_duration_ms) {
+    out << ",\"request_duration_ms\":" << *fields.request_duration_ms;
+  }
+  if (!fields.message.empty()) {
+    out << ",\"message\":\"" << json_escape(fields.message) << "\"";
+  }
+  out << "}\n";
+
+  std::lock_guard lock{structured_log_mutex()};
+  std::cerr << out.str();
+}
+
+std::string endpoint_string(const boost::asio::ip::tcp::endpoint& endpoint) {
+  return endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
 }
 
 std::optional<std::string> json_string_field(std::string_view json, std::string_view name) {
@@ -219,12 +306,17 @@ std::uint16_t key_hash_partition(std::span<const std::uint8_t> key, std::uint16_
 } // namespace
 
 class BrokerRuntime {
+  struct AppendJob;
+
   struct TopicState {
     struct PartitionState {
       explicit PartitionState(storage::PartitionLog opened_log) : log(std::move(opened_log)) {}
 
-      mutable std::mutex mutex;
+      mutable std::mutex log_mutex;
       storage::PartitionLog log;
+      mutable std::mutex append_mutex;
+      std::deque<std::shared_ptr<AppendJob>> pending_appends;
+      bool append_active{false};
     };
 
     mutable std::mutex mutex;
@@ -235,12 +327,29 @@ class BrokerRuntime {
   };
 
 public:
+  struct ProduceResult {
+    bool ok{false};
+    protocol::ProduceResponse response;
+    protocol::ErrorCode error{protocol::ErrorCode::InternalError};
+    std::string message;
+  };
+
+  using ProduceCompletion = std::function<void(ProduceResult)>;
+
   explicit BrokerRuntime(ServerOptions options, std::string broker_token)
       : data_dir_(std::move(options.data_dir)), max_frame_bytes_(options.max_frame_bytes),
         max_fetch_records_(options.max_fetch_records), max_fetch_bytes_(options.max_fetch_bytes),
         max_topic_partitions_(options.max_topic_partitions),
-        max_fetch_wait_ms_(options.max_fetch_wait_ms), broker_token_(std::move(broker_token)),
-        offset_store_(storage::OffsetStore::open(data_dir_)) {}
+        max_fetch_wait_ms_(options.max_fetch_wait_ms),
+        max_append_queue_depth_(options.max_append_queue_depth),
+        append_workers_configured_(options.append_workers),
+        max_long_poll_waiters_(options.max_long_poll_waiters),
+        broker_token_(std::move(broker_token)),
+        offset_store_(storage::OffsetStore::open(data_dir_)) {
+    start_append_workers();
+  }
+
+  ~BrokerRuntime() { stop_append_workers(); }
 
   storage::StorageRecoverySummary load_existing_topics() {
     storage::StorageRecoverySummary summary;
@@ -311,29 +420,64 @@ public:
     return {request.topic, request.partition_count, "created"};
   }
 
-  protocol::ProduceResponse produce(const protocol::ProduceRequest& request) {
+  void async_produce(protocol::ProduceRequest request, boost::asio::any_io_executor executor,
+                     ProduceCompletion completion) {
     auto topic = find_topic_or_throw(request.topic);
-    const auto partition_id = select_partition(*topic, request.key);
-    auto partition = topic->partitions.at(partition_id);
 
-    protocol::ProduceResponse response;
-    {
-      std::lock_guard log_lock{partition->mutex};
-      const auto metadata = partition->log.append(request.key, request.message);
-      response.topic = metadata.topic;
-      response.partition = metadata.partition;
-      response.offset = metadata.offset;
-      response.next_offset = partition->log.next_offset();
-      response.encoded_byte_size = metadata.encoded_byte_size;
+    auto job = std::make_shared<AppendJob>();
+    job->request = std::move(request);
+    job->executor = std::move(executor);
+    job->completion = std::move(completion);
+
+    std::shared_ptr<TopicState::PartitionState> partition;
+    if (!job->request.key.empty()) {
+      const auto partition_id = key_hash_partition(job->request.key, topic->partition_count);
+      partition = topic->partitions.at(partition_id);
+      const auto enqueued = try_enqueue_append(partition, job);
+      if (!enqueued.accepted) {
+        write_structured_log(
+            {"warn",
+             "append_overloaded",
+             {},
+             {},
+             std::string{protocol::error_code_name(protocol::ErrorCode::Overloaded)},
+             "append queue is full",
+             std::nullopt,
+             std::nullopt,
+             protocol::is_retryable_error(protocol::ErrorCode::Overloaded),
+             enqueued.depth,
+             active_long_poll_waiters()});
+        throw BrokerRequestError{protocol::ErrorCode::Overloaded, "append queue is full"};
+      }
+      return;
     }
-    notify_fetch_waiters(response.topic, response.partition);
-    return response;
+
+    std::lock_guard topic_lock{topic->mutex};
+    const auto partition_id = topic->next_round_robin_partition;
+    partition = topic->partitions.at(partition_id);
+    const auto enqueued = try_enqueue_append(partition, job);
+    if (!enqueued.accepted) {
+      write_structured_log({"warn",
+                            "append_overloaded",
+                            {},
+                            {},
+                            std::string{protocol::error_code_name(protocol::ErrorCode::Overloaded)},
+                            "append queue is full",
+                            std::nullopt,
+                            std::nullopt,
+                            protocol::is_retryable_error(protocol::ErrorCode::Overloaded),
+                            enqueued.depth,
+                            active_long_poll_waiters()});
+      throw BrokerRequestError{protocol::ErrorCode::Overloaded, "append queue is full"};
+    }
+    topic->next_round_robin_partition = static_cast<std::uint16_t>(
+        (topic->next_round_robin_partition + 1U) % topic->partition_count);
   }
 
   protocol::FetchResponse fetch(const protocol::FetchRequest& request) const {
     auto topic = find_topic_or_throw(request.topic);
     auto partition = partition_or_throw(*topic, request.partition);
-    std::lock_guard log_lock{partition->mutex};
+    std::lock_guard log_lock{partition->log_mutex};
     const auto next_offset = partition->log.next_offset();
     const auto from_offset = resolve_fetch_offset(request, next_offset);
 
@@ -341,17 +485,34 @@ public:
     response.topic = request.topic;
     response.partition = request.partition;
     response.from_offset = from_offset;
-    response.next_offset = next_offset;
+    response.next_offset = from_offset;
+    const auto max_payload_bytes = max_fetch_payload_bytes();
+    auto payload_bytes = fetch_payload_base_bytes(response);
+    if (payload_bytes > max_payload_bytes) {
+      throw BrokerRequestError{protocol::ErrorCode::InvalidLength,
+                               "fetch response metadata exceeds configured maximum size"};
+    }
     const auto records =
         partition->log.read_from(from_offset, max_fetch_records_, max_fetch_bytes_);
     response.records.reserve(records.size());
     for (const auto& record : records) {
+      const auto record_payload_bytes = fetch_record_payload_bytes(record);
+      if (payload_bytes + record_payload_bytes > max_payload_bytes) {
+        if (response.records.empty()) {
+          throw BrokerRequestError{protocol::ErrorCode::InvalidLength,
+                                   "single fetch record exceeds configured maximum response size"};
+        }
+        break;
+      }
+
       protocol::FetchRecord out;
       out.offset = record.metadata.offset;
       out.timestamp_unix_ns = record.metadata.timestamp_unix_ns;
       out.key = record.key;
       out.message = record.value;
       out.encoded_byte_size = record.metadata.encoded_byte_size;
+      response.next_offset = out.offset + 1;
+      payload_bytes += record_payload_bytes;
       response.records.push_back(std::move(out));
     }
     return response;
@@ -361,7 +522,7 @@ public:
     validate_group_or_throw(request.group);
     auto topic = find_topic_or_throw(request.topic);
     auto partition = partition_or_throw(*topic, request.partition);
-    std::lock_guard log_lock{partition->mutex};
+    std::lock_guard log_lock{partition->log_mutex};
     if (request.next_offset > partition->log.next_offset()) {
       throw BrokerRequestError{protocol::ErrorCode::InvalidOffset,
                                "commit offset is beyond partition next offset"};
@@ -378,7 +539,7 @@ public:
     for (const auto& [topic_name, topic] : topics_) {
       response.topics.reserve(response.topics.size() + topic->partitions.size());
       for (const auto& partition : topic->partitions) {
-        std::lock_guard log_lock{partition->mutex};
+        std::lock_guard log_lock{partition->log_mutex};
         response.topics.push_back(
             {topic_name, partition->log.options().partition_id, partition->log.next_offset()});
       }
@@ -389,11 +550,15 @@ public:
   [[nodiscard]] std::uint32_t max_frame_bytes() const { return max_frame_bytes_; }
   [[nodiscard]] std::uint32_t max_fetch_wait_ms() const { return max_fetch_wait_ms_; }
 
-  std::uint64_t register_fetch_waiter(std::string topic, std::uint16_t partition,
-                                      std::function<void()> callback) {
+  std::optional<std::uint64_t> register_fetch_waiter(std::string topic, std::uint16_t partition,
+                                                     std::function<void()> callback) {
     std::lock_guard lock{waiters_mutex_};
+    if (active_long_poll_waiters_ >= max_long_poll_waiters_) {
+      return std::nullopt;
+    }
     const auto id = next_waiter_id_++;
     waiters_[{std::move(topic), partition}].push_back({id, std::move(callback)});
+    ++active_long_poll_waiters_;
     return id;
   }
 
@@ -401,16 +566,25 @@ public:
     std::lock_guard lock{waiters_mutex_};
     for (auto it = waiters_.begin(); it != waiters_.end();) {
       auto& callbacks = it->second;
+      const auto before = callbacks.size();
       callbacks.erase(
           std::remove_if(callbacks.begin(), callbacks.end(),
                          [waiter_id](const auto& waiter) { return waiter.id == waiter_id; }),
           callbacks.end());
+      const auto removed = before - callbacks.size();
+      active_long_poll_waiters_ -=
+          static_cast<std::uint32_t>(std::min<std::size_t>(removed, active_long_poll_waiters_));
       if (callbacks.empty()) {
         it = waiters_.erase(it);
       } else {
         ++it;
       }
     }
+  }
+
+  [[nodiscard]] std::uint32_t active_long_poll_waiters() const {
+    std::lock_guard lock{waiters_mutex_};
+    return active_long_poll_waiters_;
   }
 
 private:
@@ -430,6 +604,171 @@ private:
     std::uint64_t id{0};
     std::function<void()> callback;
   };
+
+  struct AppendJob {
+    protocol::ProduceRequest request;
+    boost::asio::any_io_executor executor;
+    ProduceCompletion completion;
+  };
+
+  struct ReadyAppend {
+    std::shared_ptr<TopicState::PartitionState> partition;
+    std::shared_ptr<AppendJob> job;
+  };
+
+  struct EnqueueOutcome {
+    bool accepted{false};
+    std::uint32_t depth{0};
+  };
+
+  [[nodiscard]] std::size_t max_fetch_payload_bytes() const {
+    if (max_frame_bytes_ <= protocol::kFrameHeaderBytes) {
+      return 0;
+    }
+    return static_cast<std::size_t>(
+        std::min(max_fetch_bytes_, max_frame_bytes_ - protocol::kFrameHeaderBytes));
+  }
+
+  [[nodiscard]] static std::size_t
+  fetch_payload_base_bytes(const protocol::FetchResponse& response) {
+    return sizeof(std::uint32_t) + response.topic.size() + sizeof(std::uint16_t) +
+           sizeof(std::uint64_t) + sizeof(std::uint64_t) + sizeof(std::uint32_t);
+  }
+
+  [[nodiscard]] static std::size_t fetch_record_payload_bytes(const storage::Record& record) {
+    return sizeof(std::uint64_t) + sizeof(std::uint64_t) + sizeof(std::uint32_t) +
+           record.key.size() + sizeof(std::uint32_t) + record.value.size() + sizeof(std::uint32_t);
+  }
+
+  [[nodiscard]] EnqueueOutcome
+  try_enqueue_append(const std::shared_ptr<TopicState::PartitionState>& partition,
+                     std::shared_ptr<AppendJob> job) {
+    std::shared_ptr<AppendJob> ready_job;
+    {
+      std::lock_guard lock{partition->append_mutex};
+      const auto current_depth = static_cast<std::uint32_t>(partition->pending_appends.size() +
+                                                            (partition->append_active ? 1U : 0U));
+      if (current_depth >= max_append_queue_depth_) {
+        return {false, current_depth};
+      }
+      const auto accepted_depth = current_depth + 1U;
+      if (partition->append_active) {
+        partition->pending_appends.push_back(std::move(job));
+        return {true, accepted_depth};
+      }
+      partition->append_active = true;
+      ready_job = std::move(job);
+    }
+
+    schedule_append(partition, std::move(ready_job));
+    return {true, 1};
+  }
+
+  void schedule_append(const std::shared_ptr<TopicState::PartitionState>& partition,
+                       std::shared_ptr<AppendJob> job) {
+    {
+      std::lock_guard lock{append_work_mutex_};
+      ready_appends_.push_back({partition, std::move(job)});
+    }
+    append_work_cv_.notify_one();
+  }
+
+  void start_append_workers() {
+    append_workers_.reserve(append_workers_configured_);
+    for (std::uint32_t worker = 0; worker < append_workers_configured_; ++worker) {
+      append_workers_.emplace_back([this, worker] { append_worker_loop(worker); });
+    }
+  }
+
+  void stop_append_workers() {
+    {
+      std::lock_guard lock{append_work_mutex_};
+      append_stopping_ = true;
+    }
+    append_work_cv_.notify_all();
+    for (auto& worker : append_workers_) {
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+  }
+
+  void append_worker_loop(std::uint32_t worker_id) {
+    (void)worker_id;
+    for (;;) {
+      std::shared_ptr<TopicState::PartitionState> partition;
+      std::shared_ptr<AppendJob> job;
+      {
+        std::unique_lock lock{append_work_mutex_};
+        append_work_cv_.wait(lock, [this] { return append_stopping_ || !ready_appends_.empty(); });
+        if (append_stopping_ && ready_appends_.empty()) {
+          return;
+        }
+        auto ready = std::move(ready_appends_.front());
+        ready_appends_.pop_front();
+        partition = std::move(ready.partition);
+        job = std::move(ready.job);
+      }
+
+      auto result = run_append(partition, *job);
+      boost::asio::post(job->executor,
+                        [completion = std::move(job->completion),
+                         result = std::move(result)]() mutable { completion(std::move(result)); });
+      complete_append(partition);
+    }
+  }
+
+  ProduceResult run_append(const std::shared_ptr<TopicState::PartitionState>& partition,
+                           const AppendJob& job) {
+    ProduceResult result;
+    try {
+      std::lock_guard log_lock{partition->log_mutex};
+      const auto metadata = partition->log.append(job.request.key, job.request.message);
+      result.ok = true;
+      result.response.topic = metadata.topic;
+      result.response.partition = metadata.partition;
+      result.response.offset = metadata.offset;
+      result.response.next_offset = partition->log.next_offset();
+      result.response.encoded_byte_size = metadata.encoded_byte_size;
+    } catch (const std::exception& error) {
+      result.ok = false;
+      result.error = protocol::ErrorCode::InternalError;
+      result.message = error.what();
+    }
+
+    if (result.ok) {
+      notify_fetch_waiters(result.response.topic, result.response.partition);
+    } else {
+      write_structured_log({"error",
+                            "append_failed",
+                            {},
+                            {},
+                            std::string{protocol::error_code_name(result.error)},
+                            result.message,
+                            std::nullopt,
+                            std::nullopt,
+                            protocol::is_retryable_error(result.error),
+                            std::nullopt,
+                            active_long_poll_waiters()});
+    }
+    return result;
+  }
+
+  void complete_append(const std::shared_ptr<TopicState::PartitionState>& partition) {
+    std::shared_ptr<AppendJob> next;
+    {
+      std::lock_guard lock{partition->append_mutex};
+      if (!partition->pending_appends.empty()) {
+        next = std::move(partition->pending_appends.front());
+        partition->pending_appends.pop_front();
+      } else {
+        partition->append_active = false;
+      }
+    }
+    if (next) {
+      schedule_append(partition, std::move(next));
+    }
+  }
 
   std::shared_ptr<TopicState> open_topic_state(std::string_view topic_name,
                                                std::uint16_t partition_count) const {
@@ -522,6 +861,8 @@ private:
         return;
       }
       waiters = std::move(existing->second);
+      active_long_poll_waiters_ -= static_cast<std::uint32_t>(
+          std::min<std::size_t>(waiters.size(), active_long_poll_waiters_));
       waiters_.erase(existing);
     }
     for (auto& waiter : waiters) {
@@ -545,13 +886,22 @@ private:
   std::uint32_t max_fetch_bytes_;
   std::uint32_t max_topic_partitions_;
   std::uint32_t max_fetch_wait_ms_;
+  std::uint32_t max_append_queue_depth_;
+  std::uint32_t append_workers_configured_;
+  std::uint32_t max_long_poll_waiters_;
   std::string broker_token_;
   mutable std::mutex topics_mutex_;
   std::map<std::string, std::shared_ptr<TopicState>> topics_;
   mutable std::mutex offsets_mutex_;
   storage::OffsetStore offset_store_;
+  std::mutex append_work_mutex_;
+  std::condition_variable append_work_cv_;
+  std::deque<ReadyAppend> ready_appends_;
+  bool append_stopping_{false};
+  std::vector<std::thread> append_workers_;
   mutable std::mutex waiters_mutex_;
   std::uint64_t next_waiter_id_{1};
+  std::uint32_t active_long_poll_waiters_{0};
   std::map<WaiterKey, std::vector<FetchWaiter>> waiters_;
 };
 
@@ -592,9 +942,23 @@ public:
   using Tcp = boost::asio::ip::tcp;
 
   BrokerProtocolSession(Tcp::socket socket, BrokerRuntime& runtime, std::function<bool()> ready,
-                        std::function<std::string()> ready_detail)
+                        std::function<std::string()> ready_detail, std::function<void()> on_close)
       : socket_(std::move(socket)), runtime_(runtime), ready_(std::move(ready)),
-        ready_detail_(std::move(ready_detail)), authenticated_(!runtime_.auth_required()) {}
+        ready_detail_(std::move(ready_detail)), on_close_(std::move(on_close)),
+        authenticated_(!runtime_.auth_required()) {
+    boost::system::error_code ec;
+    const auto endpoint = socket_.remote_endpoint(ec);
+    if (!ec) {
+      remote_endpoint_ = endpoint_string(endpoint);
+    }
+  }
+
+  ~BrokerProtocolSession() {
+    cancel_active_waiter();
+    if (on_close_) {
+      on_close_();
+    }
+  }
 
   void start() { read_header(); }
 
@@ -610,6 +974,8 @@ private:
 
           const auto decoded = protocol::decode_header(header_buffer_, runtime_.max_frame_bytes());
           if (!decoded.ok) {
+            request_started_ = std::chrono::steady_clock::now();
+            request_frame_type_ = decoded.header.frame_type;
             write_error(decoded.header.correlation_id, decoded.error, decoded.message, true);
             return;
           }
@@ -635,9 +1001,19 @@ private:
   }
 
   void handle_frame(protocol::Frame frame) {
-    std::cerr << "protocol request correlation_id=" << frame.header.correlation_id
-              << " type=" << protocol::frame_type_name(frame.header.frame_type)
-              << " payload_bytes=" << frame.header.payload_bytes << '\n';
+    request_started_ = std::chrono::steady_clock::now();
+    request_frame_type_ = frame.header.frame_type;
+    write_structured_log({"info",
+                          "protocol_request",
+                          remote_endpoint_,
+                          std::string{protocol::frame_type_name(frame.header.frame_type)},
+                          {},
+                          {},
+                          frame.header.correlation_id,
+                          frame.header.payload_bytes,
+                          std::nullopt,
+                          std::nullopt,
+                          runtime_.active_long_poll_waiters()});
 
     if (!protocol::is_request_type(frame.header.frame_type)) {
       write_error(frame.header.correlation_id, protocol::ErrorCode::UnsupportedRequest,
@@ -769,10 +1145,18 @@ private:
     }
 
     try {
-      const auto response = runtime_.produce(request);
-      const auto payload = protocol::encode_produce_response(response);
-      write_frame(protocol::FrameType::ProduceResponse, frame.header.correlation_id, payload,
-                  false);
+      const auto correlation_id = frame.header.correlation_id;
+      auto self = shared_from_this();
+      runtime_.async_produce(
+          std::move(request), socket_.get_executor(),
+          [this, self, correlation_id](BrokerRuntime::ProduceResult result) mutable {
+            if (!result.ok) {
+              write_error(correlation_id, result.error, result.message, false);
+              return;
+            }
+            const auto payload = protocol::encode_produce_response(result.response);
+            write_frame(protocol::FrameType::ProduceResponse, correlation_id, payload, false);
+          });
     } catch (const BrokerRequestError& error) {
       write_error(frame.header.correlation_id, error.code(), error.what(), false);
     } catch (const std::exception& error) {
@@ -826,30 +1210,53 @@ private:
 
   void register_long_poll(std::uint64_t correlation_id, protocol::FetchRequest request,
                           std::uint64_t from_offset) {
+    if (active_waiter_id_) {
+      write_error(correlation_id, protocol::ErrorCode::InternalError,
+                  "session already has an active long-poll waiter", false);
+      return;
+    }
+
     auto self = shared_from_this();
     auto completed = std::make_shared<std::atomic_bool>(false);
     auto timer = std::make_shared<boost::asio::steady_timer>(socket_.get_executor());
-    auto waiter_id = std::make_shared<std::uint64_t>(0);
+    const auto executor = socket_.get_executor();
     const auto wait_ms = request.max_wait_ms;
     request.max_wait_ms = 0;
     request.from = std::to_string(from_offset);
 
-    *waiter_id = runtime_.register_fetch_waiter(
+    const auto waiter_id = runtime_.register_fetch_waiter(
         request.topic, request.partition,
-        [this, self, completed, timer, correlation_id, request]() mutable {
-          if (completed->exchange(true)) {
-            return;
-          }
-          timer->cancel();
-          try {
-            const auto response = runtime_.fetch(request);
-            write_fetch_response(correlation_id, response);
-          } catch (const BrokerRequestError& error) {
-            write_error(correlation_id, error.code(), error.what(), false);
-          } catch (const std::exception& error) {
-            write_error(correlation_id, protocol::ErrorCode::InternalError, error.what(), false);
-          }
+        [this, self, executor, completed, timer, correlation_id, request]() mutable {
+          boost::asio::post(executor, [this, self, completed, timer, correlation_id,
+                                       request]() mutable {
+            if (completed->exchange(true)) {
+              return;
+            }
+            active_waiter_id_.reset();
+            timer->cancel();
+            try {
+              const auto response = runtime_.fetch(request);
+              write_fetch_response(correlation_id, response);
+            } catch (const BrokerRequestError& error) {
+              write_error(correlation_id, error.code(), error.what(), false);
+            } catch (const std::exception& error) {
+              write_error(correlation_id, protocol::ErrorCode::InternalError, error.what(), false);
+            }
+          });
         });
+    if (!waiter_id) {
+      write_structured_log(
+          {"warn", "long_poll_overloaded", remote_endpoint_,
+           std::string{protocol::frame_type_name(protocol::FrameType::FetchRequest)},
+           std::string{protocol::error_code_name(protocol::ErrorCode::Overloaded)},
+           "long-poll waiter limit reached", correlation_id, std::nullopt,
+           protocol::is_retryable_error(protocol::ErrorCode::Overloaded), std::nullopt,
+           runtime_.active_long_poll_waiters()});
+      write_error(correlation_id, protocol::ErrorCode::Overloaded, "long-poll waiter limit reached",
+                  false);
+      return;
+    }
+    active_waiter_id_ = *waiter_id;
 
     timer->expires_after(std::chrono::milliseconds(wait_ms));
     timer->async_wait([this, self, completed, correlation_id, request,
@@ -858,6 +1265,7 @@ private:
         return;
       }
       runtime_.cancel_fetch_waiter(*waiter_id);
+      active_waiter_id_.reset();
       try {
         const auto response = runtime_.fetch(request);
         write_fetch_response(correlation_id, response);
@@ -875,12 +1283,8 @@ private:
         runtime_.max_frame_bytes() <= protocol::kFrameHeaderBytes
             ? std::size_t{0}
             : static_cast<std::size_t>(runtime_.max_frame_bytes() - protocol::kFrameHeaderBytes);
-    while (payload.size() > max_payload_bytes && response.records.size() > 1) {
-      response.records.pop_back();
-      payload = protocol::encode_fetch_response(response);
-    }
     if (payload.size() > max_payload_bytes) {
-      write_error(correlation_id, protocol::ErrorCode::InternalError,
+      write_error(correlation_id, protocol::ErrorCode::InvalidLength,
                   "fetch response exceeds configured maximum frame size", false);
       return;
     }
@@ -933,12 +1337,37 @@ private:
 
   void write_error(std::uint64_t correlation_id, protocol::ErrorCode code, std::string_view message,
                    bool close_after_write) {
-    const auto payload = protocol::encode_error_response(code, message);
+    write_structured_log({"warn", "protocol_error", remote_endpoint_,
+                          std::string{protocol::frame_type_name(request_frame_type_)},
+                          std::string{protocol::error_code_name(code)}, std::string{message},
+                          correlation_id, std::nullopt, protocol::is_retryable_error(code),
+                          std::nullopt, runtime_.active_long_poll_waiters(),
+                          request_duration_ms()});
+    auto payload = protocol::encode_error_response(code, message);
+    if (runtime_.max_frame_bytes() > protocol::kFrameHeaderBytes &&
+        payload.size() > runtime_.max_frame_bytes() - protocol::kFrameHeaderBytes) {
+      payload = protocol::encode_error_response(code, protocol::error_code_name(code));
+    }
     write_frame(protocol::FrameType::ErrorResponse, correlation_id, payload, close_after_write);
   }
 
   void write_frame(protocol::FrameType frame_type, std::uint64_t correlation_id,
                    std::span<const std::uint8_t> payload, bool close_after_write) {
+    if (frame_type != protocol::FrameType::ErrorResponse) {
+      write_structured_log({"info",
+                            "protocol_response",
+                            remote_endpoint_,
+                            std::string{protocol::frame_type_name(frame_type)},
+                            {},
+                            {},
+                            correlation_id,
+                            static_cast<std::uint32_t>(payload.size()),
+                            std::nullopt,
+                            std::nullopt,
+                            runtime_.active_long_poll_waiters(),
+                            request_duration_ms()});
+    }
+
     auto self = shared_from_this();
     auto bytes = std::make_shared<std::vector<std::uint8_t>>(
         protocol::encode_frame(frame_type, correlation_id, payload));
@@ -946,6 +1375,7 @@ private:
         socket_, boost::asio::buffer(*bytes),
         [this, self, bytes, close_after_write](const boost::system::error_code& ec, std::size_t) {
           if (ec || !socket_.is_open()) {
+            cancel_active_waiter();
             return;
           }
           if (close_after_write) {
@@ -958,11 +1388,33 @@ private:
         });
   }
 
+  [[nodiscard]] std::optional<std::uint64_t> request_duration_ms() const {
+    if (request_started_ == std::chrono::steady_clock::time_point{}) {
+      return std::nullopt;
+    }
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - request_started_)
+                                          .count());
+  }
+
+  void cancel_active_waiter() {
+    if (!active_waiter_id_) {
+      return;
+    }
+    runtime_.cancel_fetch_waiter(*active_waiter_id_);
+    active_waiter_id_.reset();
+  }
+
   Tcp::socket socket_;
   BrokerRuntime& runtime_;
   std::function<bool()> ready_;
   std::function<std::string()> ready_detail_;
+  std::function<void()> on_close_;
+  std::string remote_endpoint_;
   bool authenticated_{false};
+  std::optional<std::uint64_t> active_waiter_id_;
+  std::chrono::steady_clock::time_point request_started_{};
+  protocol::FrameType request_frame_type_{protocol::FrameType::ErrorResponse};
   std::array<std::uint8_t, protocol::kFrameHeaderBytes> header_buffer_{};
   std::vector<std::uint8_t> payload_buffer_;
 };
@@ -1009,9 +1461,19 @@ void BrokerServer::start() {
   accept_broker_client();
   accept_admin_client();
 
-  std::cerr << "boltstream-server listening on " << endpoint_to_string(options_.listen)
-            << " admin=" << endpoint_to_string(options_.admin_listen)
-            << " data=" << options_.data_dir.string() << '\n';
+  write_structured_log({"info",
+                        "server_listening",
+                        {},
+                        {},
+                        {},
+                        "broker=" + endpoint_to_string(options_.listen) +
+                            " admin=" + endpoint_to_string(options_.admin_listen) +
+                            " data=" + options_.data_dir.string(),
+                        std::nullopt,
+                        std::nullopt,
+                        std::nullopt,
+                        std::nullopt,
+                        runtime_->active_long_poll_waiters()});
 }
 
 void BrokerServer::stop() {
@@ -1028,7 +1490,17 @@ void BrokerServer::wait_for_shutdown_signal() {
   boost::asio::signal_set signals(io_, SIGINT, SIGTERM);
   signals.async_wait([this](const boost::system::error_code& error, int signal_number) {
     if (!error) {
-      std::cerr << "boltstream-server shutting down on signal " << signal_number << '\n';
+      write_structured_log({"info",
+                            "server_shutdown_signal",
+                            {},
+                            {},
+                            {},
+                            "signal=" + std::to_string(signal_number),
+                            std::nullopt,
+                            std::nullopt,
+                            std::nullopt,
+                            std::nullopt,
+                            runtime_->active_long_poll_waiters()});
       stop();
     }
   });
@@ -1074,12 +1546,22 @@ void BrokerServer::prepare_data_directory() {
 
   try {
     const auto summary = runtime_->load_existing_topics();
-    std::cerr << "storage recovery topics=" << summary.topics_recovered
-              << " partitions=" << summary.partitions_recovered
-              << " segments=" << summary.segments_scanned
-              << " indexes_rebuilt=" << summary.indexes_rebuilt
-              << " records=" << summary.records_recovered
-              << " bytes_truncated=" << summary.bytes_truncated << '\n';
+    write_structured_log({"info",
+                          "storage_recovery",
+                          {},
+                          {},
+                          {},
+                          "topics=" + std::to_string(summary.topics_recovered) +
+                              " partitions=" + std::to_string(summary.partitions_recovered) +
+                              " segments=" + std::to_string(summary.segments_scanned) +
+                              " indexes_rebuilt=" + std::to_string(summary.indexes_rebuilt) +
+                              " records=" + std::to_string(summary.records_recovered) +
+                              " bytes_truncated=" + std::to_string(summary.bytes_truncated),
+                          std::nullopt,
+                          std::nullopt,
+                          std::nullopt,
+                          std::nullopt,
+                          runtime_->active_long_poll_waiters()});
   } catch (const std::exception& error) {
     ready_ = false;
     ready_detail_ = "storage recovery failed: " + std::string{error.what()};
@@ -1095,7 +1577,17 @@ void BrokerServer::accept_broker_client() {
   broker_acceptor_.async_accept(*socket, [this, socket](const boost::system::error_code& ec) {
     if (ec) {
       if (broker_acceptor_.is_open() && ec != boost::asio::error::operation_aborted) {
-        std::cerr << "broker accept error: " << ec.message() << '\n';
+        write_structured_log({"error",
+                              "broker_accept_error",
+                              {},
+                              {},
+                              {},
+                              ec.message(),
+                              std::nullopt,
+                              std::nullopt,
+                              std::nullopt,
+                              std::nullopt,
+                              runtime_->active_long_poll_waiters()});
       }
       return;
     }
@@ -1111,7 +1603,17 @@ void BrokerServer::accept_admin_client() {
   admin_acceptor_.async_accept(*socket, [this, socket](const boost::system::error_code& ec) {
     if (ec) {
       if (admin_acceptor_.is_open() && ec != boost::asio::error::operation_aborted) {
-        std::cerr << "admin accept error: " << ec.message() << '\n';
+        write_structured_log({"error",
+                              "admin_accept_error",
+                              {},
+                              {},
+                              {},
+                              ec.message(),
+                              std::nullopt,
+                              std::nullopt,
+                              std::nullopt,
+                              std::nullopt,
+                              runtime_->active_long_poll_waiters()});
       }
       return;
     }
@@ -1123,8 +1625,31 @@ void BrokerServer::accept_admin_client() {
 }
 
 void BrokerServer::handle_broker_client(Tcp::socket socket) {
+  const auto active = active_broker_sessions_.load();
+  if (active >= options_.max_broker_connections) {
+    boost::system::error_code remote_ec;
+    const auto remote = socket.remote_endpoint(remote_ec);
+    write_structured_log({"warn",
+                          "broker_connection_rejected",
+                          remote_ec ? std::string{} : endpoint_string(remote),
+                          {},
+                          std::string{protocol::error_code_name(protocol::ErrorCode::Overloaded)},
+                          "broker connection limit reached",
+                          std::nullopt,
+                          std::nullopt,
+                          protocol::is_retryable_error(protocol::ErrorCode::Overloaded),
+                          std::nullopt,
+                          runtime_->active_long_poll_waiters()});
+    boost::system::error_code ignored;
+    socket.shutdown(Tcp::socket::shutdown_both, ignored);
+    socket.close(ignored);
+    return;
+  }
+
+  active_broker_sessions_.fetch_add(1);
   std::make_shared<BrokerProtocolSession>(
-      std::move(socket), *runtime_, [this] { return ready(); }, [this] { return ready_detail_; })
+      std::move(socket), *runtime_, [this] { return ready(); }, [this] { return ready_detail_; },
+      [this] { active_broker_sessions_.fetch_sub(1); })
       ->start();
 }
 

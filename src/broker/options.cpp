@@ -22,12 +22,12 @@ bool parse_port(std::string_view text, std::uint16_t& port) {
   return true;
 }
 
-bool parse_u32(std::string_view text, std::uint32_t& value) {
+bool parse_u32(std::string_view text, std::uint32_t& value, bool allow_zero = false) {
   std::uint32_t parsed{};
   const auto* begin = text.data();
   const auto* end = text.data() + text.size();
   const auto result = std::from_chars(begin, end, parsed);
-  if (result.ec != std::errc{} || result.ptr != end || parsed == 0) {
+  if (result.ec != std::errc{} || result.ptr != end || (!allow_zero && parsed == 0)) {
     return false;
   }
   value = parsed;
@@ -130,6 +130,34 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
         return parsed;
       }
       parsed.options.max_fetch_wait_ms = max_fetch_wait_ms;
+    } else if (arg == "--max-append-queue-depth") {
+      std::uint32_t max_append_queue_depth{};
+      if (!parse_u32(require_value(arg), max_append_queue_depth, true)) {
+        parsed.error = "invalid --max-append-queue-depth value";
+        return parsed;
+      }
+      parsed.options.max_append_queue_depth = max_append_queue_depth;
+    } else if (arg == "--append-workers") {
+      std::uint32_t append_workers{};
+      if (!parse_u32(require_value(arg), append_workers)) {
+        parsed.error = "invalid --append-workers value";
+        return parsed;
+      }
+      parsed.options.append_workers = append_workers;
+    } else if (arg == "--max-broker-connections") {
+      std::uint32_t max_broker_connections{};
+      if (!parse_u32(require_value(arg), max_broker_connections)) {
+        parsed.error = "invalid --max-broker-connections value";
+        return parsed;
+      }
+      parsed.options.max_broker_connections = max_broker_connections;
+    } else if (arg == "--max-long-poll-waiters") {
+      std::uint32_t max_long_poll_waiters{};
+      if (!parse_u32(require_value(arg), max_long_poll_waiters, true)) {
+        parsed.error = "invalid --max-long-poll-waiters value";
+        return parsed;
+      }
+      parsed.options.max_long_poll_waiters = max_long_poll_waiters;
     } else {
       parsed.error = "unknown argument: " + std::string{arg};
       return parsed;
@@ -143,7 +171,9 @@ std::string server_usage() {
   return "Usage: boltstream-server [--listen HOST:PORT] [--port PORT] "
          "[--admin-listen HOST:PORT] [--data PATH] [--max-frame-bytes BYTES] "
          "[--max-fetch-records N] [--max-fetch-bytes BYTES] "
-         "[--max-topic-partitions N] [--max-fetch-wait-ms MS]\n"
+         "[--max-topic-partitions N] [--max-fetch-wait-ms MS] "
+         "[--max-append-queue-depth N] [--append-workers N] "
+         "[--max-broker-connections N] [--max-long-poll-waiters N]\n"
          "\n"
          "Defaults:\n"
          "  --listen 0.0.0.0:9000\n"
@@ -153,7 +183,11 @@ std::string server_usage() {
          "  --max-fetch-records 100\n"
          "  --max-fetch-bytes 1048576\n"
          "  --max-topic-partitions 128\n"
-         "  --max-fetch-wait-ms 30000\n";
+         "  --max-fetch-wait-ms 30000\n"
+         "  --max-append-queue-depth 32\n"
+         "  --append-workers 2\n"
+         "  --max-broker-connections 128\n"
+         "  --max-long-poll-waiters 128\n";
 }
 
 std::string endpoint_to_string(const Endpoint& endpoint) {

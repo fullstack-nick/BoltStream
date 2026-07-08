@@ -47,6 +47,7 @@ enum class ErrorCode : std::uint32_t {
   InvalidPartition = 13,
   InvalidGroup = 14,
   InvalidOffset = 15,
+  Overloaded = 16,
 };
 
 struct FrameHeader {
@@ -172,6 +173,7 @@ struct MetadataResponse {
 
 std::string_view frame_type_name(FrameType frame_type);
 std::string_view error_code_name(ErrorCode error_code);
+bool is_retryable_error(ErrorCode error_code);
 bool is_request_type(FrameType frame_type);
 
 std::uint32_t crc32(std::span<const std::uint8_t> bytes);

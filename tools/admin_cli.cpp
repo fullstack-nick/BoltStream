@@ -197,11 +197,13 @@ int response_exit_code(const boltstream::protocol::Frame& frame) {
     std::cerr << "boltstream-admin: malformed error response: " << decoded.message << '\n';
     return 1;
   }
+  const auto retryable = boltstream::protocol::is_retryable_error(response.code);
   std::cout << "{\"status\":\"" << boltstream::protocol::error_code_name(response.code)
             << "\",\"error_code\":\"" << boltstream::protocol::error_code_name(response.code)
-            << "\",\"message\":\"" << json_escape(response.message)
+            << "\",\"retryable\":" << (retryable ? "true" : "false") << ",\"message\":\""
+            << json_escape(response.message)
             << "\",\"correlation_id\":" << frame.header.correlation_id << "}\n";
-  return 1;
+  return retryable ? 5 : 1;
 }
 
 bool auth_response_ok(const boltstream::protocol::Frame& frame) {
