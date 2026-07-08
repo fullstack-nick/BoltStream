@@ -87,6 +87,7 @@ See [docs/gcp.md](docs/gcp.md) and [docs/operations.md](docs/operations.md).
 
 Durable acceptance records live under `proof/`. Phase 1 is recorded in
 [proof/phase-1.md](proof/phase-1.md), and Phase 2 is recorded in
-[proof/phase-2.md](proof/phase-2.md). Phase 3 will be recorded in
-`proof/phase-3.md` after local checks, GitHub push, CI artifact, GCP deploy, live
-storage calls, SSH log/data-file inspection, and runtime version verification pass.
+[proof/phase-2.md](proof/phase-2.md). Phase 3 is recorded in
+[proof/phase-3.md](proof/phase-3.md) after local checks, GitHub push, CI artifact,
+GCP deploy, live storage calls, SSH log/data-file inspection, and runtime version
+verification pass.
