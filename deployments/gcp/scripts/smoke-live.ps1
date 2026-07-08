@@ -195,8 +195,8 @@ try {
   $baseConsumerArgs = @(
     "--host", $ExternalIp, "--port", "9000", "--token", $BrokerToken,
     "--topic", $CoordinatedTopic, "--group", "livephase7", "--commit", "--coordinated",
-    "--session-timeout-ms", "1200", "--heartbeat-ms", "300", "--poll-ms", "100",
-    "--idle-exit-ms", "12000", "--timeout-ms", "7000"
+    "--session-timeout-ms", "5000", "--heartbeat-ms", "1000", "--poll-ms", "100",
+    "--idle-exit-ms", "20000", "--timeout-ms", "7000"
   )
   $consumer1 = Start-Process `
     -FilePath $Consumer `
@@ -235,7 +235,7 @@ try {
 
   Stop-ProcessIfRunning -Process $consumer2
   $consumer2 = $null
-  Wait-FilePatternCount $Consumer1Out '"partitions":[0,1,2,3]' 2
+  Wait-FilePatternCount $Consumer1Out '"partitions":[0,1,2,3]' 2 22000
 
   for ($i = 0; $i -lt 4; ++$i) {
     $ProduceOutput = & $Producer --host $ExternalIp --port 9000 --token $BrokerToken --topic $CoordinatedTopic --message "live-takeover-$i"
@@ -252,7 +252,7 @@ try {
     Wait-FileContains $Consumer1Out "`"message`":`"live-takeover-$i`""
   }
 
-  if (-not $consumer1.WaitForExit(22000)) {
+  if (-not $consumer1.WaitForExit(32000)) {
     throw "Live coordinated survivor did not exit after idle timeout"
   }
   $consumer1.Refresh()

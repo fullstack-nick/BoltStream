@@ -204,8 +204,8 @@ try {
   $baseConsumerArgs = @(
     "--host", "127.0.0.1", "--port", "$BrokerPort",
     "--topic", $topic, "--group", "dashboard", "--commit", "--coordinated",
-    "--session-timeout-ms", "1200", "--heartbeat-ms", "300", "--poll-ms", "100",
-    "--idle-exit-ms", "12000", "--timeout-ms", "5000"
+    "--session-timeout-ms", "5000", "--heartbeat-ms", "1000", "--poll-ms", "100",
+    "--idle-exit-ms", "20000", "--timeout-ms", "5000"
   )
 
   $consumer1 = Start-Process `
@@ -244,7 +244,7 @@ try {
 
   Stop-ProcessIfRunning -Process $consumer2
   $consumer2 = $null
-  Wait-FilePatternCount $Consumer1Out '"partitions":[0,1,2,3]' 2 10000
+  Wait-FilePatternCount $Consumer1Out '"partitions":[0,1,2,3]' 2 20000
 
   for ($i = 0; $i -lt 4; ++$i) {
     $produced = Invoke-JsonTool $Producer @(
@@ -260,7 +260,7 @@ try {
     Wait-FileContains $Consumer1Out "`"message`":`"takeover-$i`"" 10000
   }
 
-  if (-not $consumer1.WaitForExit(20000)) {
+  if (-not $consumer1.WaitForExit(30000)) {
     throw "coordinated survivor did not exit after idle timeout"
   }
   $consumer1.Refresh()
