@@ -69,6 +69,13 @@ public:
   }
 
   template <typename CompletionToken>
+  auto async_auth(std::string_view broker_token, CompletionToken&& token) {
+    return async_request(protocol::FrameType::AuthRequest,
+                         protocol::encode_auth_request(broker_token),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
   auto async_produce(std::string_view topic, std::span<const std::uint8_t> key,
                      std::span<const std::uint8_t> message, CompletionToken&& token) {
     return async_request(protocol::FrameType::ProduceRequest,

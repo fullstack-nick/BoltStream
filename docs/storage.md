@@ -1,9 +1,8 @@
 # BoltStream Storage
 
-Phase 3 implements storage format version `1`: a durable single-partition,
-append-only log. Broker `ProduceRequest` and `FetchRequest` still return
-`not_implemented` until Phase 4; storage is operated directly through
-`boltstream-logtool` and recovered during broker startup.
+Storage format version `1` is a durable single-partition, append-only log.
+Phase 4 uses this storage path for broker `ProduceRequest` and `FetchRequest`.
+`boltstream-logtool` remains available for direct inspection and recovery checks.
 
 ## Directory Layout
 
@@ -16,7 +15,7 @@ data/
         00000000000000000000.index
 ```
 
-Only partition `0` exists in Phase 3. Topic names must match
+Only partition `0` exists in Phase 4. Topic names must match
 `[A-Za-z0-9._-]+` and must not be `.` or `..`.
 
 Segment names use the segment base offset as a zero-padded 20-digit decimal
@@ -30,12 +29,12 @@ All integer fields are big-endian.
 ```text
 uint32 record_bytes
 uint16 record_version       // 1
-uint16 flags                // 0 in Phase 3
+uint16 flags                // 0 in format version 1
 uint64 offset
 uint64 timestamp_unix_ns
 uint32 key_bytes
 uint32 value_bytes
-uint32 header_count         // 0 in Phase 3
+uint32 header_count         // 0 in format version 1
 bytes  key
 bytes  value
 uint32 record_crc32
@@ -66,8 +65,9 @@ the first incomplete record, invalid record, or CRC mismatch, truncates the
 segment from that byte onward, deletes later segments if necessary, rebuilds
 indexes, and sets `next_offset` to one past the last valid recovered record.
 
-Broker startup runs recovery for existing `topics/*/partition-000000` logs and
-writes recovery stats to `journalctl -u boltstream.service`.
+Broker startup opens existing `topics/*/partition-000000` logs, rebuilds indexes as
+needed, and writes recovery stats to `journalctl -u boltstream.service`. New topics are
+created lazily by the first valid broker produce request.
 
 ## Operator Commands
 

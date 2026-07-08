@@ -2,11 +2,10 @@
 
 BoltStream is a C++20 low-latency event streaming engine: a Kafka-inspired broker built from scratch to demonstrate Linux networking, durable storage, concurrency, testing, performance measurement, and cloud-native deployment.
 
-Phase 3 adds the first durable storage layer: a single-partition append-only log with
-stable offsets, segment files, CRC validation, index rebuild, and trailing-corruption
-recovery. Real broker produce/fetch success paths are intentionally left for Phase 4.
+Phase 4 adds real broker-backed produce and fetch over the binary TCP protocol,
+using the single-partition append-only log from Phase 3 for durable records.
 
-## Current Phase 3 Surface
+## Current Phase 4 Surface
 
 - `boltstream-server` opens broker TCP port `9000`.
 - Admin HTTP listens on `127.0.0.1:9100`.
@@ -14,9 +13,11 @@ recovery. Real broker produce/fetch success paths are intentionally left for Pha
 - `GET /health/ready` reports data-directory readiness.
 - `GET /version` reports service name, Git SHA, build type, compiler, protocol version `1`, storage format version `1`, and startup time.
 - Broker TCP port `9000` accepts versioned binary frames with correlation ids and structured error responses.
-- `boltstream-logtool` appends, reads, and recovers durable records in `data/topics/<topic>/partition-000000`.
-- `boltstream-producer` and `boltstream-consumer` use the C++ async client library and return structured `not_implemented` responses until Phase 4 broker produce/fetch behavior lands.
-- `boltstream-bench` remains a stable benchmark shell until real produce/fetch support exists.
+- `boltstream-producer` appends durable records to `data/topics/<topic>/partition-000000` through the broker and prints assigned offsets.
+- `boltstream-consumer` fetches durable records from `beginning`, `latest`, or an explicit offset through the broker.
+- `boltstream-logtool` remains available for direct append, read, and recovery inspection of durable records.
+- `BOLTSTREAM_BROKER_TOKEN` enables broker-protocol auth; local development may omit it, while GCP deploys require it.
+- `boltstream-bench` remains a stable benchmark shell until the benchmark phase.
 
 ## Native Windows Build
 
@@ -55,14 +56,12 @@ curl.exe -fsS http://127.0.0.1:9100/version
 ```
 
 Use `curl.exe` in PowerShell. Plain `curl` is a PowerShell alias.
-
-Producer and consumer currently return exit code `3` with `"status":"not_implemented"`.
-That is the expected Phase 3 result because broker produce/fetch lands in Phase 4.
+Producer output includes `offset`, `next_offset`, and encoded byte size. Consumer output includes returned records and `next_offset`.
 
 For a repeatable local smoke:
 
 ```powershell
-.\scripts\smoke-phase2.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
 ```
 
@@ -90,4 +89,4 @@ Durable acceptance records live under `proof/`. Phase 1 is recorded in
 [proof/phase-2.md](proof/phase-2.md). Phase 3 is recorded in
 [proof/phase-3.md](proof/phase-3.md) after local checks, GitHub push, CI artifact,
 GCP deploy, live storage calls, SSH log/data-file inspection, and runtime version
-verification pass.
+verification pass. Phase 4 evidence is recorded in [proof/phase-4.md](proof/phase-4.md).

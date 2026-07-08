@@ -6,8 +6,8 @@ namespace {
 void usage() {
   std::cout << "Usage: boltstream-bench --dry-run\n"
                "\n"
-               "Phase 3 keeps the benchmark command shell only. Real throughput and latency "
-               "benchmarks start after storage-backed produce/fetch support exists.\n";
+               "Phase 4 keeps the benchmark command shell only. Real throughput and latency "
+               "benchmarks start in the benchmark phase.\n";
 }
 
 } // namespace
@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  std::cerr << "boltstream-bench: real benchmark mode starts after produce/fetch support\n";
+  std::cerr << "boltstream-bench: real benchmark mode starts in the benchmark phase\n";
   usage();
   return 2;
 }

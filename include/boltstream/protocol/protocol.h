@@ -39,6 +39,7 @@ enum class ErrorCode : std::uint32_t {
   NotImplemented = 7,
   InternalError = 8,
   ReservedFlags = 9,
+  Unauthorized = 10,
 };
 
 struct FrameHeader {
@@ -81,6 +82,59 @@ struct HealthResponse {
   std::string detail;
 };
 
+struct AuthRequest {
+  std::string token;
+};
+
+struct AuthResponse {
+  std::string status;
+};
+
+struct ProduceRequest {
+  std::string topic;
+  std::vector<std::uint8_t> key;
+  std::vector<std::uint8_t> message;
+};
+
+struct FetchRequest {
+  std::string topic;
+  std::string from;
+};
+
+struct ProduceResponse {
+  std::string topic;
+  std::uint16_t partition{0};
+  std::uint64_t offset{0};
+  std::uint64_t next_offset{0};
+  std::uint32_t encoded_byte_size{0};
+};
+
+struct FetchRecord {
+  std::uint64_t offset{0};
+  std::uint64_t timestamp_unix_ns{0};
+  std::vector<std::uint8_t> key;
+  std::vector<std::uint8_t> message;
+  std::uint32_t encoded_byte_size{0};
+};
+
+struct FetchResponse {
+  std::string topic;
+  std::uint16_t partition{0};
+  std::uint64_t from_offset{0};
+  std::uint64_t next_offset{0};
+  std::vector<FetchRecord> records;
+};
+
+struct MetadataTopic {
+  std::string topic;
+  std::uint16_t partition{0};
+  std::uint64_t next_offset{0};
+};
+
+struct MetadataResponse {
+  std::vector<MetadataTopic> topics;
+};
+
 std::string_view frame_type_name(FrameType frame_type);
 std::string_view error_code_name(ErrorCode error_code);
 bool is_request_type(FrameType frame_type);
@@ -101,13 +155,32 @@ std::vector<std::uint8_t> encode_health_response(std::string_view status, std::s
 DecodeResult decode_health_response(std::span<const std::uint8_t> payload,
                                     HealthResponse& response);
 
+std::vector<std::uint8_t> encode_auth_request(std::string_view token);
+DecodeResult decode_auth_request(std::span<const std::uint8_t> payload, AuthRequest& request);
+
+std::vector<std::uint8_t> encode_auth_response(std::string_view status);
+DecodeResult decode_auth_response(std::span<const std::uint8_t> payload, AuthResponse& response);
+
 std::vector<std::uint8_t> encode_produce_request(std::string_view topic,
                                                  std::span<const std::uint8_t> key,
                                                  std::span<const std::uint8_t> message);
+DecodeResult decode_produce_request(std::span<const std::uint8_t> payload, ProduceRequest& request);
 DecodeResult validate_produce_request(std::span<const std::uint8_t> payload);
 
 std::vector<std::uint8_t> encode_fetch_request(std::string_view topic, std::string_view from);
+DecodeResult decode_fetch_request(std::span<const std::uint8_t> payload, FetchRequest& request);
 DecodeResult validate_fetch_request(std::span<const std::uint8_t> payload);
+
+std::vector<std::uint8_t> encode_produce_response(const ProduceResponse& response);
+DecodeResult decode_produce_response(std::span<const std::uint8_t> payload,
+                                     ProduceResponse& response);
+
+std::vector<std::uint8_t> encode_fetch_response(const FetchResponse& response);
+DecodeResult decode_fetch_response(std::span<const std::uint8_t> payload, FetchResponse& response);
+
+std::vector<std::uint8_t> encode_metadata_response(std::span<const MetadataTopic> topics);
+DecodeResult decode_metadata_response(std::span<const std::uint8_t> payload,
+                                      MetadataResponse& response);
 
 DecodeResult validate_empty_payload(std::span<const std::uint8_t> payload);
 

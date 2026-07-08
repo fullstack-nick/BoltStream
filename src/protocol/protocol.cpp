@@ -61,12 +61,30 @@ class PayloadReader {
 public:
   explicit PayloadReader(std::span<const std::uint8_t> bytes) : bytes_(bytes) {}
 
+  bool read_u16(std::uint16_t& value) {
+    if (remaining() < sizeof(std::uint16_t)) {
+      return false;
+    }
+    value = read_u16_be(bytes_, offset_);
+    offset_ += sizeof(std::uint16_t);
+    return true;
+  }
+
   bool read_u32(std::uint32_t& value) {
     if (remaining() < sizeof(std::uint32_t)) {
       return false;
     }
     value = read_u32_be(bytes_, offset_);
     offset_ += sizeof(std::uint32_t);
+    return true;
+  }
+
+  bool read_u64(std::uint64_t& value) {
+    if (remaining() < sizeof(std::uint64_t)) {
+      return false;
+    }
+    value = read_u64_be(bytes_, offset_);
+    offset_ += sizeof(std::uint64_t);
     return true;
   }
 
@@ -167,6 +185,8 @@ std::string_view error_code_name(ErrorCode error_code) {
     return "internal_error";
   case ErrorCode::ReservedFlags:
     return "reserved_flags";
+  case ErrorCode::Unauthorized:
+    return "unauthorized";
   }
   return "unknown_error";
 }
@@ -331,6 +351,37 @@ DecodeResult decode_health_response(std::span<const std::uint8_t> payload,
   return ok_result();
 }
 
+std::vector<std::uint8_t> encode_auth_request(std::string_view token) {
+  std::vector<std::uint8_t> out;
+  write_string(out, token);
+  return out;
+}
+
+DecodeResult decode_auth_request(std::span<const std::uint8_t> payload, AuthRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.token) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed auth request payload");
+  }
+  if (request.token.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "auth token must not be empty");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_auth_response(std::string_view status) {
+  std::vector<std::uint8_t> out;
+  write_string(out, status);
+  return out;
+}
+
+DecodeResult decode_auth_response(std::span<const std::uint8_t> payload, AuthResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.status) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed auth response payload");
+  }
+  return ok_result();
+}
+
 std::vector<std::uint8_t> encode_produce_request(std::string_view topic,
                                                  std::span<const std::uint8_t> key,
                                                  std::span<const std::uint8_t> message) {
@@ -341,22 +392,25 @@ std::vector<std::uint8_t> encode_produce_request(std::string_view topic,
   return out;
 }
 
-DecodeResult validate_produce_request(std::span<const std::uint8_t> payload) {
+DecodeResult decode_produce_request(std::span<const std::uint8_t> payload,
+                                    ProduceRequest& request) {
   PayloadReader reader{payload};
-  std::string topic;
-  std::vector<std::uint8_t> key;
-  std::vector<std::uint8_t> message;
-  if (!reader.read_string(topic) || !reader.read_bytes(key) || !reader.read_bytes(message) ||
-      !reader.done()) {
+  if (!reader.read_string(request.topic) || !reader.read_bytes(request.key) ||
+      !reader.read_bytes(request.message) || !reader.done()) {
     return error_result(ErrorCode::MalformedPayload, "malformed produce request payload");
   }
-  if (topic.empty()) {
+  if (request.topic.empty()) {
     return error_result(ErrorCode::MalformedPayload, "produce topic must not be empty");
   }
-  if (message.empty()) {
+  if (request.message.empty()) {
     return error_result(ErrorCode::MalformedPayload, "produce message must not be empty");
   }
   return ok_result();
+}
+
+DecodeResult validate_produce_request(std::span<const std::uint8_t> payload) {
+  ProduceRequest request;
+  return decode_produce_request(payload, request);
 }
 
 std::vector<std::uint8_t> encode_fetch_request(std::string_view topic, std::string_view from) {
@@ -366,18 +420,122 @@ std::vector<std::uint8_t> encode_fetch_request(std::string_view topic, std::stri
   return out;
 }
 
-DecodeResult validate_fetch_request(std::span<const std::uint8_t> payload) {
+DecodeResult decode_fetch_request(std::span<const std::uint8_t> payload, FetchRequest& request) {
   PayloadReader reader{payload};
-  std::string topic;
-  std::string from;
-  if (!reader.read_string(topic) || !reader.read_string(from) || !reader.done()) {
+  if (!reader.read_string(request.topic) || !reader.read_string(request.from) || !reader.done()) {
     return error_result(ErrorCode::MalformedPayload, "malformed fetch request payload");
   }
-  if (topic.empty()) {
+  if (request.topic.empty()) {
     return error_result(ErrorCode::MalformedPayload, "fetch topic must not be empty");
   }
-  if (from.empty()) {
+  if (request.from.empty()) {
     return error_result(ErrorCode::MalformedPayload, "fetch offset selector must not be empty");
+  }
+  return ok_result();
+}
+
+DecodeResult validate_fetch_request(std::span<const std::uint8_t> payload) {
+  FetchRequest request;
+  return decode_fetch_request(payload, request);
+}
+
+std::vector<std::uint8_t> encode_produce_response(const ProduceResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.topic);
+  write_u16(out, response.partition);
+  write_u64(out, response.offset);
+  write_u64(out, response.next_offset);
+  write_u32(out, response.encoded_byte_size);
+  return out;
+}
+
+DecodeResult decode_produce_response(std::span<const std::uint8_t> payload,
+                                     ProduceResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.topic) || !reader.read_u16(response.partition) ||
+      !reader.read_u64(response.offset) || !reader.read_u64(response.next_offset) ||
+      !reader.read_u32(response.encoded_byte_size) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed produce response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_fetch_response(const FetchResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.topic);
+  write_u16(out, response.partition);
+  write_u64(out, response.from_offset);
+  write_u64(out, response.next_offset);
+  write_u32(out, static_cast<std::uint32_t>(response.records.size()));
+  for (const auto& record : response.records) {
+    write_u64(out, record.offset);
+    write_u64(out, record.timestamp_unix_ns);
+    write_bytes(out, record.key);
+    write_bytes(out, record.message);
+    write_u32(out, record.encoded_byte_size);
+  }
+  return out;
+}
+
+DecodeResult decode_fetch_response(std::span<const std::uint8_t> payload, FetchResponse& response) {
+  PayloadReader reader{payload};
+  std::uint32_t record_count = 0;
+  if (!reader.read_string(response.topic) || !reader.read_u16(response.partition) ||
+      !reader.read_u64(response.from_offset) || !reader.read_u64(response.next_offset) ||
+      !reader.read_u32(record_count)) {
+    return error_result(ErrorCode::MalformedPayload, "malformed fetch response payload");
+  }
+
+  response.records.clear();
+  response.records.reserve(record_count);
+  for (std::uint32_t index = 0; index < record_count; ++index) {
+    FetchRecord record;
+    if (!reader.read_u64(record.offset) || !reader.read_u64(record.timestamp_unix_ns) ||
+        !reader.read_bytes(record.key) || !reader.read_bytes(record.message) ||
+        !reader.read_u32(record.encoded_byte_size)) {
+      return error_result(ErrorCode::MalformedPayload, "malformed fetch response payload");
+    }
+    response.records.push_back(std::move(record));
+  }
+
+  if (!reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed fetch response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_metadata_response(std::span<const MetadataTopic> topics) {
+  std::vector<std::uint8_t> out;
+  write_u32(out, static_cast<std::uint32_t>(topics.size()));
+  for (const auto& topic : topics) {
+    write_string(out, topic.topic);
+    write_u16(out, topic.partition);
+    write_u64(out, topic.next_offset);
+  }
+  return out;
+}
+
+DecodeResult decode_metadata_response(std::span<const std::uint8_t> payload,
+                                      MetadataResponse& response) {
+  PayloadReader reader{payload};
+  std::uint32_t topic_count = 0;
+  if (!reader.read_u32(topic_count)) {
+    return error_result(ErrorCode::MalformedPayload, "malformed metadata response payload");
+  }
+
+  response.topics.clear();
+  response.topics.reserve(topic_count);
+  for (std::uint32_t index = 0; index < topic_count; ++index) {
+    MetadataTopic topic;
+    if (!reader.read_string(topic.topic) || !reader.read_u16(topic.partition) ||
+        !reader.read_u64(topic.next_offset)) {
+      return error_result(ErrorCode::MalformedPayload, "malformed metadata response payload");
+    }
+    response.topics.push_back(std::move(topic));
+  }
+
+  if (!reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed metadata response payload");
   }
   return ok_result();
 }

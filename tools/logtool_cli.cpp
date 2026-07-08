@@ -100,7 +100,7 @@ Options parse_options(int argc, char** argv) {
     } else if (arg == "--partition") {
       if (!parse_uint(require_value(arg), options.partition) ||
           options.partition != boltstream::storage::kPhaseThreePartition) {
-        options.error = "Phase 3 supports only --partition 0";
+        options.error = "single-partition storage supports only --partition 0";
         return options;
       }
     } else if (arg == "--segment-bytes") {

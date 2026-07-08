@@ -2,7 +2,7 @@
 
 #include <gtest/gtest.h>
 
-TEST(BuildInfoTests, CurrentBuildInfoContainsPhaseThreeVersions) {
+TEST(BuildInfoTests, CurrentBuildInfoContainsProtocolAndStorageVersions) {
   const auto info = boltstream::current_build_info();
 
   EXPECT_EQ(info.service, "boltstream");

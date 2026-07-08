@@ -6,7 +6,7 @@
 .\scripts\toolchain-check.ps1
 .\scripts\build.ps1 -Preset windows-gcc-debug
 .\scripts\test.ps1 -Preset windows-gcc-debug
-.\scripts\smoke-phase2.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
 .\scripts\format.ps1
 ```
 
@@ -19,7 +19,9 @@ Use `windows-msvc-debug` for the MSVC path and `windows-clang-debug` for the LLV
   --listen 127.0.0.1:9000 `
   --admin-listen 127.0.0.1:9100 `
   --data .\data `
-  --max-frame-bytes 1048576
+  --max-frame-bytes 1048576 `
+  --max-fetch-records 100 `
+  --max-fetch-bytes 1048576
 ```
 
 Admin endpoints:
@@ -52,13 +54,14 @@ Broker protocol smoke:
   --max-records 10
 ```
 
-In Phase 3, producer and consumer should return exit code `3` and structured
-`not_implemented` output. That proves CLI-to-client-library-to-broker binary framing,
-while `boltstream-logtool` proves the durable single-partition storage layer.
+Producer and consumer should return exit code `0` with structured JSON. If
+`BOLTSTREAM_BROKER_TOKEN` is set on the broker, pass `--token` or set the same
+environment variable for the CLI before calling produce/fetch.
 
 Repeatable storage smoke:
 
 ```powershell
+.\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
 ```
 

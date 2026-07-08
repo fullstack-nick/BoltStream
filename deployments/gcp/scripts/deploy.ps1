@@ -27,9 +27,23 @@ if ([string]::IsNullOrWhiteSpace($GitSha)) {
   throw "GitSha is required."
 }
 
+$BrokerTokenOutput = & $Gcloud secrets versions access latest --secret "boltstream-broker-token" --project $ProjectId 2>$null
+$BrokerToken = ($BrokerTokenOutput -join "`n").Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($BrokerToken)) {
+  throw "Secret Manager secret 'boltstream-broker-token' must have a non-empty latest version before deploy."
+}
+
 $RemoteArtifact = "/tmp/boltstream-$GitSha.tar.gz"
 $RemoteScript = "/tmp/boltstream-deploy-$GitSha.sh"
+$RemoteEnv = "/tmp/boltstream-$GitSha.env"
 $LocalScript = Join-Path $env:TEMP "boltstream-deploy-$GitSha.sh"
+$LocalEnv = Join-Path $env:TEMP "boltstream-$GitSha.env"
+
+$EnvFile = @"
+BOLTSTREAM_GIT_SHA=$GitSha
+BOLTSTREAM_BROKER_TOKEN=$BrokerToken
+"@
+[System.IO.File]::WriteAllText($LocalEnv, $EnvFile.Replace("`r`n", "`n"), [System.Text.Encoding]::ASCII)
 
 $DeployScript = @"
 #!/usr/bin/env bash
@@ -37,6 +51,7 @@ set -euo pipefail
 
 GIT_SHA="$GitSha"
 ARTIFACT="$RemoteArtifact"
+ENV_FILE="$RemoteEnv"
 RELEASE_DIR="/opt/boltstream/releases/$GitSha"
 
 sudo useradd --system --home /var/lib/boltstream --shell /usr/sbin/nologin boltstream 2>/dev/null || true
@@ -48,11 +63,8 @@ sudo ln -sfn "`$RELEASE_DIR" /opt/boltstream/current
 sudo chown -R root:root /opt/boltstream
 sudo chown -R boltstream:boltstream /var/lib/boltstream
 
-sudo tee /etc/boltstream/boltstream.env >/dev/null <<EOF
-BOLTSTREAM_GIT_SHA=$GitSha
-EOF
-sudo chmod 0640 /etc/boltstream/boltstream.env
-sudo chown root:boltstream /etc/boltstream/boltstream.env
+sudo install -o root -g boltstream -m 0640 "`$ENV_FILE" /etc/boltstream/boltstream.env
+sudo rm -f "`$ENV_FILE"
 
 sudo tee /etc/systemd/system/boltstream.service >/dev/null <<'EOF'
 [Unit]
@@ -87,9 +99,15 @@ curl -fsS http://127.0.0.1:9100/version
 "@
 [System.IO.File]::WriteAllText($LocalScript, $DeployScript.Replace("`r`n", "`n"), [System.Text.Encoding]::ASCII)
 
-& $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $Artifact "${InstanceName}:$RemoteArtifact"
-if ($LASTEXITCODE -ne 0) { throw "Failed to copy artifact to $InstanceName." }
-& $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $LocalScript "${InstanceName}:$RemoteScript"
-if ($LASTEXITCODE -ne 0) { throw "Failed to copy deploy script to $InstanceName." }
-& $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "bash $RemoteScript"
-if ($LASTEXITCODE -ne 0) { throw "Remote deployment failed on $InstanceName." }
+try {
+  & $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $Artifact "${InstanceName}:$RemoteArtifact"
+  if ($LASTEXITCODE -ne 0) { throw "Failed to copy artifact to $InstanceName." }
+  & $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $LocalEnv "${InstanceName}:$RemoteEnv"
+  if ($LASTEXITCODE -ne 0) { throw "Failed to copy broker environment to $InstanceName." }
+  & $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $LocalScript "${InstanceName}:$RemoteScript"
+  if ($LASTEXITCODE -ne 0) { throw "Failed to copy deploy script to $InstanceName." }
+  & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "bash $RemoteScript"
+  if ($LASTEXITCODE -ne 0) { throw "Remote deployment failed on $InstanceName." }
+} finally {
+  Remove-Item -Force -LiteralPath $LocalEnv, $LocalScript -ErrorAction SilentlyContinue
+}

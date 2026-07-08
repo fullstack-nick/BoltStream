@@ -8,9 +8,12 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <memory>
 #include <string>
 
 namespace boltstream::broker {
+
+class BrokerRuntime;
 
 class BrokerServer {
 public:
@@ -52,6 +55,7 @@ private:
   boost::asio::io_context io_;
   Tcp::acceptor broker_acceptor_;
   Tcp::acceptor admin_acceptor_;
+  std::unique_ptr<BrokerRuntime> runtime_;
 };
 
 std::string utc_now_iso8601();

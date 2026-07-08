@@ -33,6 +33,8 @@ df -h /var/lib/boltstream
 ls -la /var/lib/boltstream
 sudo -u boltstream test -w /var/lib/boltstream
 echo "data dir writable by boltstream"
+echo "== topic files =="
+find /var/lib/boltstream/topics -maxdepth 4 -type f -print 2>/dev/null || true
 echo "== release =="
 readlink -f /opt/boltstream/current
 ls -la /opt/boltstream/current/bin

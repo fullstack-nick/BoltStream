@@ -19,9 +19,11 @@ TEST(OptionsTests, DefaultsMatchCurrentContract) {
   EXPECT_EQ(parsed.options.admin_listen.port, 9100);
   EXPECT_EQ(parsed.options.data_dir.generic_string(), "./data");
   EXPECT_EQ(parsed.options.max_frame_bytes, 1024U * 1024U);
+  EXPECT_EQ(parsed.options.max_fetch_records, 100U);
+  EXPECT_EQ(parsed.options.max_fetch_bytes, 1024U * 1024U);
 }
 
-TEST(OptionsTests, ParsesListenAdminPortAndData) {
+TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
   constexpr std::array args{
       std::string_view{"--listen"},
       std::string_view{"127.0.0.1:9001"},
@@ -31,6 +33,10 @@ TEST(OptionsTests, ParsesListenAdminPortAndData) {
       std::string_view{"./tmp-data"},
       std::string_view{"--max-frame-bytes"},
       std::string_view{"4096"},
+      std::string_view{"--max-fetch-records"},
+      std::string_view{"12"},
+      std::string_view{"--max-fetch-bytes"},
+      std::string_view{"2048"},
   };
 
   const auto parsed = parse_server_options(args);
@@ -42,6 +48,8 @@ TEST(OptionsTests, ParsesListenAdminPortAndData) {
   EXPECT_EQ(parsed.options.admin_listen.port, 9101);
   EXPECT_EQ(parsed.options.data_dir.generic_string(), "./tmp-data");
   EXPECT_EQ(parsed.options.max_frame_bytes, 4096U);
+  EXPECT_EQ(parsed.options.max_fetch_records, 12U);
+  EXPECT_EQ(parsed.options.max_fetch_bytes, 2048U);
 }
 
 TEST(OptionsTests, ParsesPortShortcut) {

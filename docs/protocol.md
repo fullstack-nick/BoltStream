@@ -1,8 +1,8 @@
 # BoltStream Protocol
 
 BoltStream broker/client traffic uses a custom binary TCP protocol. Protocol version
-`1` validates framed requests and preserves correlation ids; broker produce/fetch
-success responses are implemented in Phase 4.
+`1` validates framed requests, preserves correlation ids, and supports broker-backed
+produce/fetch against the durable single-partition log.
 
 ## Frame Header
 
@@ -42,9 +42,9 @@ The broker enforces `--max-frame-bytes`, defaulting to `1048576`. The limit incl
 | 13 | `AuthResponse` |
 
 The broker accepts `HealthRequest`, `MetadataRequest`, `ProduceRequest`, `FetchRequest`,
-`OffsetCommitRequest`, and `AuthRequest`. Health returns `HealthResponse`. The remaining
-valid requests return `ErrorResponse` with `not_implemented` until the broker behavior
-phase lands.
+`OffsetCommitRequest`, and `AuthRequest`. Health returns `HealthResponse`. Metadata,
+produce, fetch, and auth return success frames when valid. Offset commits remain
+`not_implemented` until consumer groups land.
 
 ## Payload Encoding
 
@@ -60,9 +60,14 @@ Payloads:
 - `HealthRequest`: empty.
 - `HealthResponse`: `string status`, `string detail`.
 - `MetadataRequest`: empty.
+- `MetadataResponse`: `uint32 topic_count`, then repeated `string topic`, `uint16 partition`, `uint64 next_offset`.
 - `ProduceRequest`: `string topic`, `bytes key`, `bytes message`.
+- `ProduceResponse`: `string topic`, `uint16 partition`, `uint64 offset`, `uint64 next_offset`, `uint32 encoded_bytes`.
 - `FetchRequest`: `string topic`, `string from`.
-- `OffsetCommitRequest` and `AuthRequest`: empty.
+- `FetchResponse`: `string topic`, `uint16 partition`, `uint64 from_offset`, `uint64 next_offset`, `uint32 record_count`, then repeated `uint64 offset`, `uint64 timestamp_unix_ns`, `bytes key`, `bytes message`, `uint32 encoded_bytes`.
+- `AuthRequest`: `string token`.
+- `AuthResponse`: `string status`.
+- `OffsetCommitRequest`: empty.
 - `ErrorResponse`: `uint32 error_code`, `string message`.
 
 ## Error Codes
@@ -78,10 +83,14 @@ Payloads:
 | 7 | `not_implemented` |
 | 8 | `internal_error` |
 | 9 | `reserved_flags` |
+| 10 | `unauthorized` |
 
 Malformed or unsafe frames receive a structured `ErrorResponse` when possible and then
-the broker closes the connection. Valid but unsupported operations keep the
-connection open and return `not_implemented` with the original correlation id.
+the broker closes the connection. Valid but unsupported operations keep the connection
+open and return `not_implemented` with the original correlation id. If
+`BOLTSTREAM_BROKER_TOKEN` is configured, metadata, produce, and fetch require a prior
+successful `AuthRequest`; unauthorized requests return `unauthorized` and close the
+connection. Health remains unauthenticated.
 
 ## CLI Behavior
 
@@ -97,5 +106,9 @@ The producer and consumer CLIs use the same C++ async client library as other cl
   --topic trades --from beginning
 ```
 
-Until Phase 4 implements broker produce/fetch, both commands return exit code `3` and a
-structured JSON line with `"status":"not_implemented"`.
+Both commands return exit code `0` on success and print one structured JSON line. The
+producer includes the assigned offset and next offset. The consumer includes the
+returned records and next offset.
+
+When the broker requires auth, pass `--token TOKEN` or set `BOLTSTREAM_BROKER_TOKEN`
+before running producer or consumer.

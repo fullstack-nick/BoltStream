@@ -4,12 +4,14 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -20,6 +22,7 @@ struct ConsumerOptions {
   std::string topic;
   std::string from{"beginning"};
   std::string group;
+  std::string token;
   bool help_requested{false};
   std::string error;
 };
@@ -28,9 +31,10 @@ void usage() {
   std::cout << "Usage: boltstream-consumer --topic TOPIC [--from beginning|latest|OFFSET] "
                "[--group GROUP]\n"
                "                           [--host HOST] [--port PORT] [--timeout-ms MS]\n"
+               "                           [--token TOKEN]\n"
                "\n"
-               "Sends a real binary protocol FetchRequest. The broker returns a structured "
-               "not_implemented response until Phase 4 produce/fetch support lands.\n";
+               "Sends a binary protocol FetchRequest and prints returned records as JSON.\n"
+               "If --token is omitted, BOLTSTREAM_BROKER_TOKEN is used when present.\n";
 }
 
 bool parse_u16(std::string_view text, std::uint16_t& value) {
@@ -62,6 +66,25 @@ bool parse_int(std::string_view text, int& value) {
   } catch (...) {
     return false;
   }
+}
+
+std::optional<std::string> environment_value(const char* name) {
+#if defined(_WIN32)
+  char* value = nullptr;
+  std::size_t value_size = 0;
+  if (_dupenv_s(&value, &value_size, name) != 0 || value == nullptr) {
+    return std::nullopt;
+  }
+  std::string out{value};
+  std::free(value);
+  return out;
+#else
+  const auto* value = std::getenv(name);
+  if (value == nullptr) {
+    return std::nullopt;
+  }
+  return std::string{value};
+#endif
 }
 
 ConsumerOptions parse_options(int argc, char** argv) {
@@ -97,14 +120,23 @@ ConsumerOptions parse_options(int argc, char** argv) {
       options.from = std::string{require_value(arg)};
     } else if (arg == "--group") {
       options.group = std::string{require_value(arg)};
+    } else if (arg == "--token") {
+      options.token = std::string{require_value(arg)};
     } else {
       options.error = "unknown argument: " + std::string{arg};
       return options;
     }
   }
 
-  if (!options.help_requested && options.topic.empty()) {
-    options.error = "--topic is required";
+  if (!options.help_requested) {
+    if (options.token.empty()) {
+      if (auto token = environment_value("BOLTSTREAM_BROKER_TOKEN")) {
+        options.token = *token;
+      }
+    }
+    if (options.topic.empty()) {
+      options.error = "--topic is required";
+    }
   }
   return options;
 }
@@ -120,10 +152,42 @@ std::string json_escape(std::string_view value) {
   return out;
 }
 
+std::string as_string(const std::vector<std::uint8_t>& bytes) {
+  return {bytes.begin(), bytes.end()};
+}
+
 int response_exit_code(const boltstream::protocol::Frame& frame) {
-  if (frame.header.frame_type != boltstream::protocol::FrameType::ErrorResponse) {
-    std::cout << "{\"status\":\"ok\",\"correlation_id\":" << frame.header.correlation_id << "}\n";
+  if (frame.header.frame_type == boltstream::protocol::FrameType::FetchResponse) {
+    boltstream::protocol::FetchResponse response;
+    const auto decoded = boltstream::protocol::decode_fetch_response(frame.payload, response);
+    if (!decoded.ok) {
+      std::cerr << "boltstream-consumer: malformed fetch response: " << decoded.message << '\n';
+      return 1;
+    }
+
+    std::cout << "{\"status\":\"ok\",\"topic\":\"" << json_escape(response.topic)
+              << "\",\"partition\":" << response.partition << ",\"from\":" << response.from_offset
+              << ",\"count\":" << response.records.size()
+              << ",\"next_offset\":" << response.next_offset << ",\"records\":[";
+    for (std::size_t index = 0; index < response.records.size(); ++index) {
+      const auto& record = response.records[index];
+      if (index > 0) {
+        std::cout << ",";
+      }
+      std::cout << "{\"offset\":" << record.offset
+                << ",\"timestamp_unix_ns\":" << record.timestamp_unix_ns << ",\"key\":\""
+                << json_escape(as_string(record.key)) << "\",\"message\":\""
+                << json_escape(as_string(record.message))
+                << "\",\"encoded_bytes\":" << record.encoded_byte_size << "}";
+    }
+    std::cout << "],\"correlation_id\":" << frame.header.correlation_id << "}\n";
     return 0;
+  }
+
+  if (frame.header.frame_type != boltstream::protocol::FrameType::ErrorResponse) {
+    std::cerr << "boltstream-consumer: unexpected response frame type "
+              << boltstream::protocol::frame_type_name(frame.header.frame_type) << '\n';
+    return 1;
   }
 
   boltstream::protocol::ErrorResponse response;
@@ -138,6 +202,15 @@ int response_exit_code(const boltstream::protocol::Frame& frame) {
             << "\",\"message\":\"" << json_escape(response.message)
             << "\",\"correlation_id\":" << frame.header.correlation_id << "}\n";
   return response.code == boltstream::protocol::ErrorCode::NotImplemented ? 3 : 1;
+}
+
+bool auth_response_ok(const boltstream::protocol::Frame& frame) {
+  if (frame.header.frame_type != boltstream::protocol::FrameType::AuthResponse) {
+    return false;
+  }
+  boltstream::protocol::AuthResponse response;
+  const auto decoded = boltstream::protocol::decode_auth_response(frame.payload, response);
+  return decoded.ok && (response.status == "authenticated" || response.status == "disabled");
 }
 
 } // namespace
@@ -185,16 +258,44 @@ int main(int argc, char** argv) {
           finish(1);
           return;
         }
-        client->async_fetch(
-            options.topic, options.from,
-            [&](const boost::system::error_code& request_ec, boltstream::protocol::Frame frame) {
-              if (request_ec) {
-                std::cerr << "boltstream-consumer: request failed: " << request_ec.message()
-                          << '\n';
+
+        auto send_fetch = [&] {
+          client->async_fetch(
+              options.topic, options.from,
+              [&](const boost::system::error_code& request_ec, boltstream::protocol::Frame frame) {
+                if (request_ec) {
+                  std::cerr << "boltstream-consumer: request failed: " << request_ec.message()
+                            << '\n';
+                  finish(1);
+                  return;
+                }
+                finish(response_exit_code(frame));
+              });
+        };
+
+        if (options.token.empty()) {
+          send_fetch();
+          return;
+        }
+
+        client->async_auth(
+            options.token, [&, send_fetch](const boost::system::error_code& auth_ec,
+                                           boltstream::protocol::Frame frame) mutable {
+              if (auth_ec) {
+                std::cerr << "boltstream-consumer: auth failed: " << auth_ec.message() << '\n';
                 finish(1);
                 return;
               }
-              finish(response_exit_code(frame));
+              if (frame.header.frame_type == boltstream::protocol::FrameType::ErrorResponse) {
+                finish(response_exit_code(frame));
+                return;
+              }
+              if (!auth_response_ok(frame)) {
+                std::cerr << "boltstream-consumer: malformed auth response\n";
+                finish(1);
+                return;
+              }
+              send_fetch();
             });
       });
   io.run();

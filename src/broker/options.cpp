@@ -101,6 +101,20 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
         return parsed;
       }
       parsed.options.max_frame_bytes = max_frame_bytes;
+    } else if (arg == "--max-fetch-records") {
+      std::uint32_t max_fetch_records{};
+      if (!parse_u32(require_value(arg), max_fetch_records)) {
+        parsed.error = "invalid --max-fetch-records value";
+        return parsed;
+      }
+      parsed.options.max_fetch_records = max_fetch_records;
+    } else if (arg == "--max-fetch-bytes") {
+      std::uint32_t max_fetch_bytes{};
+      if (!parse_u32(require_value(arg), max_fetch_bytes)) {
+        parsed.error = "invalid --max-fetch-bytes value";
+        return parsed;
+      }
+      parsed.options.max_fetch_bytes = max_fetch_bytes;
     } else {
       parsed.error = "unknown argument: " + std::string{arg};
       return parsed;
@@ -112,13 +126,16 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
 
 std::string server_usage() {
   return "Usage: boltstream-server [--listen HOST:PORT] [--port PORT] "
-         "[--admin-listen HOST:PORT] [--data PATH] [--max-frame-bytes BYTES]\n"
+         "[--admin-listen HOST:PORT] [--data PATH] [--max-frame-bytes BYTES] "
+         "[--max-fetch-records N] [--max-fetch-bytes BYTES]\n"
          "\n"
          "Defaults:\n"
          "  --listen 0.0.0.0:9000\n"
          "  --admin-listen 127.0.0.1:9100\n"
          "  --data ./data\n"
-         "  --max-frame-bytes 1048576\n";
+         "  --max-frame-bytes 1048576\n"
+         "  --max-fetch-records 100\n"
+         "  --max-fetch-bytes 1048576\n";
 }
 
 std::string endpoint_to_string(const Endpoint& endpoint) {

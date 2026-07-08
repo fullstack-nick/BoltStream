@@ -14,6 +14,7 @@ BoltStream's GCP deployment is intentionally low-level and controlled: Terraform
 - Data disk: 20 GB standard persistent disk mounted at `/var/lib/boltstream`
 - Broker port: `9000`, restricted to the operator `/32`
 - Admin port: `9100`, bound to localhost only
+- Broker auth token: latest version of Secret Manager secret `boltstream-broker-token`
 
 The operator source IP is written only to ignored local Terraform variables. Do not commit concrete personal IP addresses to public docs.
 
@@ -62,6 +63,7 @@ Download or build the CI Linux artifact, then deploy it by exact Git SHA:
 ```
 
 The deploy script installs to `/opt/boltstream/releases/<git-sha>`, updates `/opt/boltstream/current`, writes a systemd unit, restarts `boltstream.service`, and checks `/version` on the VM.
+From Phase 4 onward, deploy also reads the latest `boltstream-broker-token` Secret Manager version and writes it to `/etc/boltstream/boltstream.env`; deploy fails if that secret payload is missing.
 
 ## Live Smoke
 
@@ -73,9 +75,9 @@ The deploy script installs to `/opt/boltstream/releases/<git-sha>`, updates `/op
 Live proof must verify:
 
 - TCP broker port `9000` is reachable from the operator machine.
+- Authenticated producer and consumer calls succeed against the live broker.
 - `/health/live`, `/health/ready`, and `/version` succeed over SSH on localhost.
 - `/version` reports the deployed Git SHA.
 - `systemctl status boltstream` is active.
 - `journalctl -u boltstream` shows clean startup and no errors after live calls.
-- `/var/lib/boltstream` is mounted and writable by the service user.
-
+- `/var/lib/boltstream` is mounted and writable by the service user, with topic segment/index files present after live produce.

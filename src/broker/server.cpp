@@ -6,19 +6,182 @@
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
 
+#include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
 
 namespace boltstream::broker {
+
+class BrokerRuntime {
+  struct TopicState {
+    explicit TopicState(storage::PartitionLog opened_log) : log(std::move(opened_log)) {}
+
+    mutable std::mutex mutex;
+    storage::PartitionLog log;
+  };
+
+public:
+  explicit BrokerRuntime(ServerOptions options, std::string broker_token)
+      : data_dir_(std::move(options.data_dir)), max_frame_bytes_(options.max_frame_bytes),
+        max_fetch_records_(options.max_fetch_records), max_fetch_bytes_(options.max_fetch_bytes),
+        broker_token_(std::move(broker_token)) {}
+
+  storage::StorageRecoverySummary load_existing_topics() {
+    storage::StorageRecoverySummary summary;
+    const auto topics_dir = data_dir_ / "topics";
+    std::error_code ec;
+    if (!std::filesystem::exists(topics_dir, ec)) {
+      return summary;
+    }
+
+    std::lock_guard lock{topics_mutex_};
+    for (const auto& entry : std::filesystem::directory_iterator(topics_dir)) {
+      if (!entry.is_directory()) {
+        continue;
+      }
+
+      const auto topic = entry.path().filename().string();
+      if (!storage::is_valid_topic_name(topic)) {
+        continue;
+      }
+
+      const auto partition_dir =
+          storage::partition_directory(data_dir_, topic, storage::kPhaseThreePartition);
+      if (!std::filesystem::exists(partition_dir, ec)) {
+        continue;
+      }
+
+      auto log = storage::PartitionLog::open(
+          {data_dir_, topic, storage::kPhaseThreePartition, storage::kDefaultMaxSegmentBytes});
+      const auto& stats = log.recovery_stats();
+      topics_[topic] = std::make_shared<TopicState>(std::move(log));
+
+      ++summary.topics_recovered;
+      ++summary.partitions_recovered;
+      summary.segments_scanned += stats.segments_scanned;
+      summary.indexes_rebuilt += stats.indexes_rebuilt;
+      summary.records_recovered += stats.records_recovered;
+      summary.bytes_truncated += stats.bytes_truncated;
+    }
+    return summary;
+  }
+
+  [[nodiscard]] bool auth_required() const { return !broker_token_.empty(); }
+
+  [[nodiscard]] bool authenticate(std::string_view token) const {
+    return !auth_required() || token == broker_token_;
+  }
+
+  protocol::ProduceResponse produce(const protocol::ProduceRequest& request) {
+    auto topic = open_or_create_topic(request.topic);
+    std::lock_guard log_lock{topic->mutex};
+    const auto metadata = topic->log.append(request.key, request.message);
+
+    protocol::ProduceResponse response;
+    response.topic = metadata.topic;
+    response.partition = metadata.partition;
+    response.offset = metadata.offset;
+    response.next_offset = topic->log.next_offset();
+    response.encoded_byte_size = metadata.encoded_byte_size;
+    return response;
+  }
+
+  [[nodiscard]] std::uint64_t next_offset_or_zero(std::string_view topic_name) const {
+    const auto topic = find_topic(topic_name);
+    if (!topic) {
+      return 0;
+    }
+    std::lock_guard log_lock{topic->mutex};
+    return topic->log.next_offset();
+  }
+
+  protocol::FetchResponse fetch(std::string_view topic_name, std::uint64_t from_offset) const {
+    protocol::FetchResponse response;
+    response.topic = std::string{topic_name};
+    response.partition = storage::kPhaseThreePartition;
+    response.from_offset = from_offset;
+
+    const auto topic = find_topic(topic_name);
+    if (!topic) {
+      response.next_offset = 0;
+      return response;
+    }
+
+    std::lock_guard log_lock{topic->mutex};
+    const auto records = topic->log.read_from(from_offset, max_fetch_records_, max_fetch_bytes_);
+    response.next_offset = topic->log.next_offset();
+    response.records.reserve(records.size());
+    for (const auto& record : records) {
+      protocol::FetchRecord out;
+      out.offset = record.metadata.offset;
+      out.timestamp_unix_ns = record.metadata.timestamp_unix_ns;
+      out.key = record.key;
+      out.message = record.value;
+      out.encoded_byte_size = record.metadata.encoded_byte_size;
+      response.records.push_back(std::move(out));
+    }
+    return response;
+  }
+
+  protocol::MetadataResponse metadata() const {
+    protocol::MetadataResponse response;
+    std::lock_guard topics_lock{topics_mutex_};
+    response.topics.reserve(topics_.size());
+    for (const auto& [topic_name, topic] : topics_) {
+      std::lock_guard log_lock{topic->mutex};
+      response.topics.push_back(
+          {topic_name, storage::kPhaseThreePartition, topic->log.next_offset()});
+    }
+    return response;
+  }
+
+  [[nodiscard]] std::uint32_t max_frame_bytes() const { return max_frame_bytes_; }
+
+private:
+  std::shared_ptr<TopicState> open_or_create_topic(std::string_view topic_name) {
+    std::lock_guard lock{topics_mutex_};
+    const auto name = std::string{topic_name};
+    const auto existing = topics_.find(name);
+    if (existing != topics_.end()) {
+      return existing->second;
+    }
+
+    auto log = storage::PartitionLog::open(
+        {data_dir_, name, storage::kPhaseThreePartition, storage::kDefaultMaxSegmentBytes});
+    auto topic = std::make_shared<TopicState>(std::move(log));
+    topics_.emplace(name, topic);
+    return topic;
+  }
+
+  [[nodiscard]] std::shared_ptr<TopicState> find_topic(std::string_view topic_name) const {
+    std::lock_guard lock{topics_mutex_};
+    const auto existing = topics_.find(std::string{topic_name});
+    return existing == topics_.end() ? nullptr : existing->second;
+  }
+
+  std::filesystem::path data_dir_;
+  std::uint32_t max_frame_bytes_;
+  std::uint32_t max_fetch_records_;
+  std::uint32_t max_fetch_bytes_;
+  std::string broker_token_;
+  mutable std::mutex topics_mutex_;
+  std::map<std::string, std::shared_ptr<TopicState>> topics_;
+};
+
 namespace {
 
 std::string normalize_request_path(std::string_view request) {
@@ -35,14 +198,40 @@ std::string normalize_request_path(std::string_view request) {
   return std::string{line.substr(first_space + 1, second_space - first_space - 1)};
 }
 
+std::string broker_token_from_environment() {
+#if defined(_WIN32)
+  char* token = nullptr;
+  std::size_t token_size = 0;
+  if (_dupenv_s(&token, &token_size, "BOLTSTREAM_BROKER_TOKEN") != 0 || token == nullptr) {
+    return {};
+  }
+  std::string value{token};
+  std::free(token);
+  return value;
+#else
+  const auto* token = std::getenv("BOLTSTREAM_BROKER_TOKEN");
+  return token == nullptr ? std::string{} : std::string{token};
+#endif
+}
+
+bool parse_u64(std::string_view text, std::uint64_t& value) {
+  if (text.empty()) {
+    return false;
+  }
+  const auto* begin = text.data();
+  const auto* end = text.data() + text.size();
+  const auto parsed = std::from_chars(begin, end, value);
+  return parsed.ec == std::errc{} && parsed.ptr == end;
+}
+
 class BrokerProtocolSession : public std::enable_shared_from_this<BrokerProtocolSession> {
 public:
   using Tcp = boost::asio::ip::tcp;
 
-  BrokerProtocolSession(Tcp::socket socket, std::uint32_t max_frame_bytes,
-                        std::function<bool()> ready, std::function<std::string()> ready_detail)
-      : socket_(std::move(socket)), max_frame_bytes_(max_frame_bytes), ready_(std::move(ready)),
-        ready_detail_(std::move(ready_detail)) {}
+  BrokerProtocolSession(Tcp::socket socket, BrokerRuntime& runtime, std::function<bool()> ready,
+                        std::function<std::string()> ready_detail)
+      : socket_(std::move(socket)), runtime_(runtime), ready_(std::move(ready)),
+        ready_detail_(std::move(ready_detail)), authenticated_(!runtime_.auth_required()) {}
 
   void start() { read_header(); }
 
@@ -56,7 +245,7 @@ private:
             return;
           }
 
-          const auto decoded = protocol::decode_header(header_buffer_, max_frame_bytes_);
+          const auto decoded = protocol::decode_header(header_buffer_, runtime_.max_frame_bytes());
           if (!decoded.ok) {
             write_error(decoded.header.correlation_id, decoded.error, decoded.message, true);
             return;
@@ -98,22 +287,20 @@ private:
       handle_health(std::move(frame));
       return;
     case protocol::FrameType::MetadataRequest:
-      handle_empty_not_implemented(std::move(frame), "metadata is implemented in Phase 4");
+      handle_metadata(std::move(frame));
       return;
     case protocol::FrameType::ProduceRequest:
-      handle_validated_not_implemented(std::move(frame), protocol::validate_produce_request,
-                                       "produce storage is implemented in Phase 4");
+      handle_produce(std::move(frame));
       return;
     case protocol::FrameType::FetchRequest:
-      handle_validated_not_implemented(std::move(frame), protocol::validate_fetch_request,
-                                       "fetch storage is implemented in Phase 4");
+      handle_fetch(std::move(frame));
       return;
     case protocol::FrameType::OffsetCommitRequest:
       handle_empty_not_implemented(std::move(frame),
                                    "offset commits are implemented with consumer groups");
       return;
     case protocol::FrameType::AuthRequest:
-      handle_empty_not_implemented(std::move(frame), "auth is enforced in a later phase");
+      handle_auth(std::move(frame));
       return;
     default:
       write_error(frame.header.correlation_id, protocol::ErrorCode::UnsupportedRequest,
@@ -133,16 +320,125 @@ private:
     write_frame(protocol::FrameType::HealthResponse, frame.header.correlation_id, payload, false);
   }
 
-  using Validator = protocol::DecodeResult (*)(std::span<const std::uint8_t>);
+  void handle_auth(protocol::Frame frame) {
+    protocol::AuthRequest request;
+    const auto decoded = protocol::decode_auth_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
 
-  void handle_validated_not_implemented(protocol::Frame frame, Validator validator,
-                                        std::string_view message) {
-    const auto validation = validator(frame.payload);
+    if (!runtime_.authenticate(request.token)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::Unauthorized,
+                  "invalid broker token", true);
+      return;
+    }
+
+    authenticated_ = true;
+    const auto payload =
+        protocol::encode_auth_response(runtime_.auth_required() ? "authenticated" : "disabled");
+    write_frame(protocol::FrameType::AuthResponse, frame.header.correlation_id, payload, false);
+  }
+
+  bool require_auth(std::uint64_t correlation_id) {
+    if (authenticated_) {
+      return true;
+    }
+    write_error(correlation_id, protocol::ErrorCode::Unauthorized, "authentication required", true);
+    return false;
+  }
+
+  void handle_metadata(protocol::Frame frame) {
+    const auto validation = protocol::validate_empty_payload(frame.payload);
     if (!validation.ok) {
       write_error(frame.header.correlation_id, validation.error, validation.message, true);
       return;
     }
-    write_error(frame.header.correlation_id, protocol::ErrorCode::NotImplemented, message, false);
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    const auto metadata = runtime_.metadata();
+    const auto payload = protocol::encode_metadata_response(metadata.topics);
+    write_frame(protocol::FrameType::MetadataResponse, frame.header.correlation_id, payload, false);
+  }
+
+  void handle_produce(protocol::Frame frame) {
+    protocol::ProduceRequest request;
+    const auto decoded = protocol::decode_produce_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.produce(request);
+      const auto payload = protocol::encode_produce_response(response);
+      write_frame(protocol::FrameType::ProduceResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_fetch(protocol::Frame frame) {
+    protocol::FetchRequest request;
+    const auto decoded = protocol::decode_fetch_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    std::uint64_t from_offset = 0;
+    if (request.from == "beginning") {
+      from_offset = 0;
+    } else if (request.from == "latest") {
+      from_offset = runtime_.next_offset_or_zero(request.topic);
+    } else if (!parse_u64(request.from, from_offset)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "fetch offset selector must be beginning, latest, or an unsigned offset", true);
+      return;
+    }
+
+    try {
+      auto response = runtime_.fetch(request.topic, from_offset);
+      auto payload = protocol::encode_fetch_response(response);
+      const auto max_payload_bytes =
+          runtime_.max_frame_bytes() <= protocol::kFrameHeaderBytes
+              ? std::size_t{0}
+              : static_cast<std::size_t>(runtime_.max_frame_bytes() - protocol::kFrameHeaderBytes);
+      while (payload.size() > max_payload_bytes && response.records.size() > 1) {
+        response.records.pop_back();
+        payload = protocol::encode_fetch_response(response);
+      }
+      if (payload.size() > max_payload_bytes) {
+        write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError,
+                    "fetch response exceeds configured maximum frame size", false);
+        return;
+      }
+
+      write_frame(protocol::FrameType::FetchResponse, frame.header.correlation_id, payload, false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
   }
 
   void handle_empty_not_implemented(protocol::Frame frame, std::string_view message) {
@@ -182,9 +478,10 @@ private:
   }
 
   Tcp::socket socket_;
-  std::uint32_t max_frame_bytes_;
+  BrokerRuntime& runtime_;
   std::function<bool()> ready_;
   std::function<std::string()> ready_detail_;
+  bool authenticated_{false};
   std::array<std::uint8_t, protocol::kFrameHeaderBytes> header_buffer_{};
   std::vector<std::uint8_t> payload_buffer_;
 };
@@ -209,7 +506,8 @@ std::string utc_now_iso8601() {
 
 BrokerServer::BrokerServer(ServerOptions options, BuildInfo build_info)
     : options_(std::move(options)), build_info_(std::move(build_info)),
-      startup_time_utc_(utc_now_iso8601()), broker_acceptor_(io_), admin_acceptor_(io_) {}
+      startup_time_utc_(utc_now_iso8601()), broker_acceptor_(io_), admin_acceptor_(io_),
+      runtime_(std::make_unique<BrokerRuntime>(options_, broker_token_from_environment())) {}
 
 BrokerServer::~BrokerServer() { stop(); }
 
@@ -294,7 +592,7 @@ void BrokerServer::prepare_data_directory() {
   std::filesystem::remove(probe, ec);
 
   try {
-    const auto summary = storage::recover_all_logs(options_.data_dir);
+    const auto summary = runtime_->load_existing_topics();
     std::cerr << "storage recovery topics=" << summary.topics_recovered
               << " partitions=" << summary.partitions_recovered
               << " segments=" << summary.segments_scanned
@@ -345,8 +643,7 @@ void BrokerServer::accept_admin_client() {
 
 void BrokerServer::handle_broker_client(Tcp::socket socket) {
   std::make_shared<BrokerProtocolSession>(
-      std::move(socket), options_.max_frame_bytes, [this] { return ready(); },
-      [this] { return ready_detail_; })
+      std::move(socket), *runtime_, [this] { return ready(); }, [this] { return ready_detail_; })
       ->start();
 }
 

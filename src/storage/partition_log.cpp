@@ -259,7 +259,7 @@ PartitionLog::PartitionLog(PartitionLogOptions options) : options_(std::move(opt
     throw std::invalid_argument("invalid topic name");
   }
   if (options_.partition_id != kPhaseThreePartition) {
-    throw std::invalid_argument("Phase 3 supports only partition 0");
+    throw std::invalid_argument("single-partition storage supports only partition 0");
   }
   if (options_.max_segment_bytes == 0) {
     throw std::invalid_argument("max_segment_bytes must be greater than zero");
