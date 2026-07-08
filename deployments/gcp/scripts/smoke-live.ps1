@@ -290,7 +290,7 @@ sudo mkdir -p /etc/systemd/system/boltstream.service.d
 sudo tee /etc/systemd/system/boltstream.service.d/phase8-smoke.conf >/dev/null <<'EOF'
 [Service]
 ExecStart=
-ExecStart=/opt/boltstream/current/bin/boltstream-server --listen 0.0.0.0:9000 --admin-listen 127.0.0.1:9100 --data /var/lib/boltstream --segment-bytes 96 --segment-max-age-seconds 0 --retention-max-age-seconds 1 --retention-max-bytes 0 --retention-check-interval-ms 0
+ExecStart=/opt/boltstream/current/bin/boltstream-server --listen 0.0.0.0:9000 --admin-listen 127.0.0.1:9100 --data /var/lib/boltstream --segment-bytes 96 --segment-max-age-seconds 0 --retention-check-interval-ms 0
 EOF
 sudo systemctl daemon-reload
 sudo systemctl restart boltstream.service
@@ -365,7 +365,7 @@ if [ "`${#logs[@]}" -lt 3 ]; then
   exit 1
 fi
 for ((i=0; i<`${#logs[@]}-1; ++i)); do
-  sudo touch -d '10 seconds ago' "`${logs[$i]}"
+    sudo touch -d '8 days ago' "`${logs[`$i]}"
 done
 "@
   $Phase8AgeLocal = Join-Path $env:TEMP "boltstream-phase8-age.sh"
