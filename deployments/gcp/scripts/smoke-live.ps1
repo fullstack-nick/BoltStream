@@ -92,6 +92,25 @@ if ($Consumed.status -ne "ok" -or $Consumed.count -ne 1 -or
 }
 Write-Host "Live broker produce/fetch succeeded for topic $Topic."
 
+$CommitOutput = & $Consumer --host $ExternalIp --port 9000 --token $BrokerToken --topic $Topic --partition $Produced.partition --group livephase5 --from beginning --commit
+if ($LASTEXITCODE -ne 0) {
+  throw "Live group commit failed with exit code $LASTEXITCODE. Output: $($CommitOutput -join "`n")"
+}
+$Committed = ($CommitOutput -join "`n") | ConvertFrom-Json
+if ($Committed.status -ne "ok" -or $Committed.count -ne 1 -or $Committed.committed_offset -ne 1) {
+  throw "Unexpected live group commit output: $($Committed | ConvertTo-Json -Compress)"
+}
+
+$ResumeOutput = & $Consumer --host $ExternalIp --port 9000 --token $BrokerToken --topic $Topic --partition $Produced.partition --group livephase5
+if ($LASTEXITCODE -ne 0) {
+  throw "Live committed resume failed with exit code $LASTEXITCODE. Output: $($ResumeOutput -join "`n")"
+}
+$Resumed = ($ResumeOutput -join "`n") | ConvertFrom-Json
+if ($Resumed.status -ne "ok" -or $Resumed.from -ne 1 -or $Resumed.count -ne 0) {
+  throw "Unexpected live committed resume output: $($Resumed | ConvertTo-Json -Compress)"
+}
+Write-Host "Live broker group commit/resume succeeded for topic $Topic."
+
 $RemoteScript = "/tmp/boltstream-smoke-live.sh"
 $LocalScript = Join-Path $env:TEMP "boltstream-smoke-live.sh"
 
@@ -109,6 +128,8 @@ curl -fsS http://127.0.0.1:9100/version
 echo
 echo "topics:"
 find /var/lib/boltstream/topics -maxdepth 4 -type f -print 2>/dev/null || true
+echo "consumer offsets:"
+find /var/lib/boltstream/consumer_offsets -maxdepth 3 -type f -print -exec tail -n 5 {} \; 2>/dev/null || true
 echo "journal:"
 ACTIVE_SINCE="$(systemctl show -p ActiveEnterTimestamp --value boltstream.service)"
 journalctl -u boltstream.service --since "${ACTIVE_SINCE}" -n 80 --no-pager

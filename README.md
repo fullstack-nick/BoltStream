@@ -97,3 +97,4 @@ Durable acceptance records live under `proof/`. Phase 1 is recorded in
 [proof/phase-3.md](proof/phase-3.md) after local checks, GitHub push, CI artifact,
 GCP deploy, live storage calls, SSH log/data-file inspection, and runtime version
 verification pass. Phase 4 evidence is recorded in [proof/phase-4.md](proof/phase-4.md).
+Phase 5 evidence is recorded in [proof/phase-5.md](proof/phase-5.md).
