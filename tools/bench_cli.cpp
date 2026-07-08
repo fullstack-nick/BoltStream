@@ -6,7 +6,7 @@ namespace {
 void usage() {
   std::cout << "Usage: boltstream-bench --dry-run\n"
                "\n"
-               "Phase 2 keeps the benchmark command shell only. Real throughput and latency "
+               "Phase 3 keeps the benchmark command shell only. Real throughput and latency "
                "benchmarks start after storage-backed produce/fetch support exists.\n";
 }
 

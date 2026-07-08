@@ -1,6 +1,7 @@
 #include "boltstream/broker/server.h"
 
 #include "boltstream/protocol/protocol.h"
+#include "boltstream/storage/partition_log.h"
 
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
@@ -14,6 +15,7 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 
 namespace boltstream::broker {
@@ -290,6 +292,20 @@ void BrokerServer::prepare_data_directory() {
     out << "ok\n";
   }
   std::filesystem::remove(probe, ec);
+
+  try {
+    const auto summary = storage::recover_all_logs(options_.data_dir);
+    std::cerr << "storage recovery topics=" << summary.topics_recovered
+              << " partitions=" << summary.partitions_recovered
+              << " segments=" << summary.segments_scanned
+              << " indexes_rebuilt=" << summary.indexes_rebuilt
+              << " records=" << summary.records_recovered
+              << " bytes_truncated=" << summary.bytes_truncated << '\n';
+  } catch (const std::exception& error) {
+    ready_ = false;
+    ready_detail_ = "storage recovery failed: " + std::string{error.what()};
+    throw std::runtime_error(ready_detail_);
+  }
 
   ready_ = true;
   ready_detail_ = "ready";

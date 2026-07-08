@@ -7,7 +7,7 @@
 
 using boltstream::broker::parse_server_options;
 
-TEST(OptionsTests, DefaultsMatchPhaseTwoContract) {
+TEST(OptionsTests, DefaultsMatchCurrentContract) {
   constexpr std::array<std::string_view, 0> args{};
 
   const auto parsed = parse_server_options(args);

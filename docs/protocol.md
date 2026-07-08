@@ -1,8 +1,8 @@
 # BoltStream Protocol
 
-BoltStream broker/client traffic uses a custom binary TCP protocol. Phase 2 implements
-protocol version `1` and validates framed requests; durable produce/fetch behavior is
-implemented in later phases.
+BoltStream broker/client traffic uses a custom binary TCP protocol. Protocol version
+`1` validates framed requests and preserves correlation ids; broker produce/fetch
+success responses are implemented in Phase 4.
 
 ## Frame Header
 
@@ -41,10 +41,10 @@ The broker enforces `--max-frame-bytes`, defaulting to `1048576`. The limit incl
 | 12 | `AuthRequest` |
 | 13 | `AuthResponse` |
 
-Phase 2 accepts `HealthRequest`, `MetadataRequest`, `ProduceRequest`, `FetchRequest`,
+The broker accepts `HealthRequest`, `MetadataRequest`, `ProduceRequest`, `FetchRequest`,
 `OffsetCommitRequest`, and `AuthRequest`. Health returns `HealthResponse`. The remaining
-valid requests return `ErrorResponse` with `not_implemented` until the storage and
-broker behavior phases land.
+valid requests return `ErrorResponse` with `not_implemented` until the broker behavior
+phase lands.
 
 ## Payload Encoding
 
@@ -55,14 +55,14 @@ uint32 byte_length
 uint8[byte_length] bytes
 ```
 
-Phase 2 payloads:
+Payloads:
 
 - `HealthRequest`: empty.
 - `HealthResponse`: `string status`, `string detail`.
 - `MetadataRequest`: empty.
 - `ProduceRequest`: `string topic`, `bytes key`, `bytes message`.
 - `FetchRequest`: `string topic`, `string from`.
-- `OffsetCommitRequest` and `AuthRequest`: empty in Phase 2.
+- `OffsetCommitRequest` and `AuthRequest`: empty.
 - `ErrorResponse`: `uint32 error_code`, `string message`.
 
 ## Error Codes
@@ -80,12 +80,12 @@ Phase 2 payloads:
 | 9 | `reserved_flags` |
 
 Malformed or unsafe frames receive a structured `ErrorResponse` when possible and then
-the broker closes the connection. Valid but unsupported Phase 2 operations keep the
+the broker closes the connection. Valid but unsupported operations keep the
 connection open and return `not_implemented` with the original correlation id.
 
 ## CLI Behavior
 
-The Phase 2 CLIs use the same C++ async client library as other clients:
+The producer and consumer CLIs use the same C++ async client library as other clients:
 
 ```powershell
 .\build\windows-gcc-debug\boltstream-producer.exe `
@@ -97,5 +97,5 @@ The Phase 2 CLIs use the same C++ async client library as other clients:
   --topic trades --from beginning
 ```
 
-Until Phase 4 implements real produce/fetch, both commands return exit code `3` and a
+Until Phase 4 implements broker produce/fetch, both commands return exit code `3` and a
 structured JSON line with `"status":"not_implemented"`.

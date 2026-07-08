@@ -91,7 +91,8 @@ add_library(boltstream_core
   src/broker/server.cpp
   src/client/async_client.cpp
   src/common/build_info.cpp
-  src/protocol/protocol.cpp)
+  src/protocol/protocol.cpp
+  src/storage/partition_log.cpp)
 
 target_include_directories(boltstream_core
   PUBLIC
@@ -119,11 +120,15 @@ target_link_libraries(boltstream-consumer PRIVATE boltstream_core boltstream_war
 add_executable(boltstream-bench tools/bench_cli.cpp)
 target_link_libraries(boltstream-bench PRIVATE boltstream_warnings)
 
+add_executable(boltstream-logtool tools/logtool_cli.cpp)
+target_link_libraries(boltstream-logtool PRIVATE boltstream_core boltstream_warnings)
+
 install(TARGETS
   boltstream-server
   boltstream-producer
   boltstream-consumer
   boltstream-bench
+  boltstream-logtool
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(FILES config/boltstream.example.yaml DESTINATION "${CMAKE_INSTALL_SYSCONFDIR}/boltstream")
@@ -142,7 +147,8 @@ if(BOLTSTREAM_BUILD_TESTS AND BUILD_TESTING)
     tests/build_info_tests.cpp
     tests/client_broker_tests.cpp
     tests/options_tests.cpp
-    tests/protocol_tests.cpp)
+    tests/protocol_tests.cpp
+    tests/storage_tests.cpp)
   target_link_libraries(boltstream_tests PRIVATE boltstream_core GTest::gtest_main boltstream_warnings)
   include(GoogleTest)
   gtest_discover_tests(boltstream_tests)

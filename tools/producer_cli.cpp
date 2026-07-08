@@ -29,8 +29,8 @@ void usage() {
   std::cout << "Usage: boltstream-producer --topic TOPIC --message VALUE [--key KEY]\n"
                "                           [--host HOST] [--port PORT] [--timeout-ms MS]\n"
                "\n"
-               "Phase 2 sends a real binary protocol ProduceRequest. The broker returns a "
-               "structured not_implemented response until durable produce/fetch support lands.\n";
+               "Sends a real binary protocol ProduceRequest. The broker returns a structured "
+               "not_implemented response until Phase 4 produce/fetch support lands.\n";
 }
 
 bool parse_u16(std::string_view text, std::uint16_t& value) {

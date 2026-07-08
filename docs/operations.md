@@ -38,11 +38,29 @@ Broker protocol smoke:
 .\build\windows-gcc-debug\boltstream-consumer.exe `
   --host 127.0.0.1 --port 9000 `
   --topic trades --from beginning
+
+.\build\windows-gcc-debug\boltstream-logtool.exe append `
+  --data .\data `
+  --topic trades `
+  --key AAPL `
+  --message "AAPL,100,192.41"
+
+.\build\windows-gcc-debug\boltstream-logtool.exe read `
+  --data .\data `
+  --topic trades `
+  --from 0 `
+  --max-records 10
 ```
 
-In Phase 2, producer and consumer should return exit code `3` and structured
+In Phase 3, producer and consumer should return exit code `3` and structured
 `not_implemented` output. That proves CLI-to-client-library-to-broker binary framing,
-not durable storage.
+while `boltstream-logtool` proves the durable single-partition storage layer.
+
+Repeatable storage smoke:
+
+```powershell
+.\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
+```
 
 ## Linux Service Layout
 
@@ -62,6 +80,7 @@ systemctl --no-pager --full status boltstream.service
 journalctl -u boltstream.service -n 80 --no-pager
 curl -fsS http://127.0.0.1:9100/version
 df -h /var/lib/boltstream
+find /var/lib/boltstream/topics -maxdepth 4 -type f -print 2>/dev/null
 readlink -f /opt/boltstream/current
 ```
 

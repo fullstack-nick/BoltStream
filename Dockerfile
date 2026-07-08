@@ -37,6 +37,7 @@ COPY --from=builder /src/build/linux-gcc-release/boltstream-server /usr/local/bi
 COPY --from=builder /src/build/linux-gcc-release/boltstream-producer /usr/local/bin/boltstream-producer
 COPY --from=builder /src/build/linux-gcc-release/boltstream-consumer /usr/local/bin/boltstream-consumer
 COPY --from=builder /src/build/linux-gcc-release/boltstream-bench /usr/local/bin/boltstream-bench
+COPY --from=builder /src/build/linux-gcc-release/boltstream-logtool /usr/local/bin/boltstream-logtool
 
 EXPOSE 9000
 USER boltstream
