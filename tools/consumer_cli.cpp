@@ -511,72 +511,81 @@ int run_coordinated_consumer(const ConsumerOptions& options) {
   auto last_heartbeat = std::chrono::steady_clock::now();
 
   auto join_and_sync = [&]() -> int {
-    boltstream::protocol::JoinGroupRequest join_request;
-    join_request.group = options.group;
-    join_request.topic = options.topic;
-    join_request.member_id = member_id;
-    join_request.session_timeout_ms = options.session_timeout_ms;
-    auto join_result = request_once(options, boltstream::protocol::FrameType::JoinGroupRequest,
-                                    boltstream::protocol::encode_join_group_request(join_request));
-    if (!join_result.ok) {
-      return transport_failure_exit(join_result, "join-group");
-    }
-    if (join_result.frame.header.frame_type == boltstream::protocol::FrameType::ErrorResponse) {
-      return response_exit_code(join_result.frame);
-    }
-    if (join_result.frame.header.frame_type != boltstream::protocol::FrameType::JoinGroupResponse) {
-      std::cerr << "boltstream-consumer: unexpected join response frame type "
-                << boltstream::protocol::frame_type_name(join_result.frame.header.frame_type)
-                << '\n';
-      return 1;
-    }
-    boltstream::protocol::JoinGroupResponse join_response;
-    auto decoded =
-        boltstream::protocol::decode_join_group_response(join_result.frame.payload, join_response);
-    if (!decoded.ok) {
-      std::cerr << "boltstream-consumer: malformed join response: " << decoded.message << '\n';
-      return 1;
-    }
-    member_id = join_response.member_id;
-    generation_id = join_response.generation_id;
-    std::cout << "{\"event\":\"join\",\"member_id\":\"" << json_escape(member_id)
-              << "\",\"generation_id\":" << generation_id << ",\"group\":\""
-              << json_escape(options.group) << "\",\"topic\":\"" << json_escape(options.topic)
-              << "\"}\n";
-
-    boltstream::protocol::SyncGroupRequest sync_request;
-    sync_request.group = options.group;
-    sync_request.topic = options.topic;
-    sync_request.member_id = member_id;
-    sync_request.generation_id = generation_id;
-    auto sync_result = request_once(options, boltstream::protocol::FrameType::SyncGroupRequest,
-                                    boltstream::protocol::encode_sync_group_request(sync_request));
-    if (!sync_result.ok) {
-      return transport_failure_exit(sync_result, "sync-group");
-    }
-    if (sync_result.frame.header.frame_type == boltstream::protocol::FrameType::ErrorResponse) {
-      if (should_rejoin(sync_result.frame)) {
-        print_rebalance_event(sync_result.frame, member_id, generation_id);
+    for (int attempt = 0; attempt < 8; ++attempt) {
+      boltstream::protocol::JoinGroupRequest join_request;
+      join_request.group = options.group;
+      join_request.topic = options.topic;
+      join_request.member_id = member_id;
+      join_request.session_timeout_ms = options.session_timeout_ms;
+      auto join_result =
+          request_once(options, boltstream::protocol::FrameType::JoinGroupRequest,
+                       boltstream::protocol::encode_join_group_request(join_request));
+      if (!join_result.ok) {
+        return transport_failure_exit(join_result, "join-group");
       }
-      return response_exit_code(sync_result.frame);
+      if (join_result.frame.header.frame_type == boltstream::protocol::FrameType::ErrorResponse) {
+        return response_exit_code(join_result.frame);
+      }
+      if (join_result.frame.header.frame_type !=
+          boltstream::protocol::FrameType::JoinGroupResponse) {
+        std::cerr << "boltstream-consumer: unexpected join response frame type "
+                  << boltstream::protocol::frame_type_name(join_result.frame.header.frame_type)
+                  << '\n';
+        return 1;
+      }
+      boltstream::protocol::JoinGroupResponse join_response;
+      auto decoded = boltstream::protocol::decode_join_group_response(join_result.frame.payload,
+                                                                      join_response);
+      if (!decoded.ok) {
+        std::cerr << "boltstream-consumer: malformed join response: " << decoded.message << '\n';
+        return 1;
+      }
+      member_id = join_response.member_id;
+      generation_id = join_response.generation_id;
+      std::cout << "{\"event\":\"join\",\"member_id\":\"" << json_escape(member_id)
+                << "\",\"generation_id\":" << generation_id << ",\"group\":\""
+                << json_escape(options.group) << "\",\"topic\":\"" << json_escape(options.topic)
+                << "\"}\n";
+
+      boltstream::protocol::SyncGroupRequest sync_request;
+      sync_request.group = options.group;
+      sync_request.topic = options.topic;
+      sync_request.member_id = member_id;
+      sync_request.generation_id = generation_id;
+      auto sync_result =
+          request_once(options, boltstream::protocol::FrameType::SyncGroupRequest,
+                       boltstream::protocol::encode_sync_group_request(sync_request));
+      if (!sync_result.ok) {
+        return transport_failure_exit(sync_result, "sync-group");
+      }
+      if (sync_result.frame.header.frame_type == boltstream::protocol::FrameType::ErrorResponse) {
+        if (should_rejoin(sync_result.frame)) {
+          print_rebalance_event(sync_result.frame, member_id, generation_id);
+          continue;
+        }
+        return response_exit_code(sync_result.frame);
+      }
+      if (sync_result.frame.header.frame_type !=
+          boltstream::protocol::FrameType::SyncGroupResponse) {
+        std::cerr << "boltstream-consumer: unexpected sync response frame type "
+                  << boltstream::protocol::frame_type_name(sync_result.frame.header.frame_type)
+                  << '\n';
+        return 1;
+      }
+      boltstream::protocol::SyncGroupResponse sync_response;
+      decoded = boltstream::protocol::decode_sync_group_response(sync_result.frame.payload,
+                                                                 sync_response);
+      if (!decoded.ok) {
+        std::cerr << "boltstream-consumer: malformed sync response: " << decoded.message << '\n';
+        return 1;
+      }
+      assignment = std::move(sync_response.assignment);
+      print_assignment_event(member_id, generation_id, assignment);
+      last_heartbeat = std::chrono::steady_clock::now();
+      return 0;
     }
-    if (sync_result.frame.header.frame_type != boltstream::protocol::FrameType::SyncGroupResponse) {
-      std::cerr << "boltstream-consumer: unexpected sync response frame type "
-                << boltstream::protocol::frame_type_name(sync_result.frame.header.frame_type)
-                << '\n';
-      return 1;
-    }
-    boltstream::protocol::SyncGroupResponse sync_response;
-    decoded =
-        boltstream::protocol::decode_sync_group_response(sync_result.frame.payload, sync_response);
-    if (!decoded.ok) {
-      std::cerr << "boltstream-consumer: malformed sync response: " << decoded.message << '\n';
-      return 1;
-    }
-    assignment = std::move(sync_response.assignment);
-    print_assignment_event(member_id, generation_id, assignment);
-    last_heartbeat = std::chrono::steady_clock::now();
-    return 0;
+    std::cerr << "boltstream-consumer: too many rebalances while joining group\n";
+    return 5;
   };
 
   auto join_code = join_and_sync();
