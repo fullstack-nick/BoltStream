@@ -113,6 +113,20 @@ function Wait-FilePatternCount {
   throw "Timed out waiting for '$Text' count $MinimumCount in '$Path'. Content: $content"
 }
 
+function Get-FilePatternCount {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Text
+  )
+
+  $content = ""
+  if (Test-Path $Path) {
+    $raw = Get-Content -Raw $Path
+    if ($null -ne $raw) { $content = [string]$raw }
+  }
+  return [regex]::Matches($content, [regex]::Escape($Text)).Count
+}
+
 Write-Host "Checking TCP broker port 9000 from operator machine."
 $client = [System.Net.Sockets.TcpClient]::new()
 $async = $client.BeginConnect($ExternalIp, 9000, $null, $null)
@@ -233,9 +247,10 @@ try {
   Wait-FileContains $Consumer2Out '"message":"live-share-2"'
   Wait-FileContains $Consumer2Out '"message":"live-share-3"'
 
+  $fullAssignmentBeforeTakeover = Get-FilePatternCount $Consumer1Out '"partitions":[0,1,2,3]'
   Stop-ProcessIfRunning -Process $consumer2
   $consumer2 = $null
-  Wait-FilePatternCount $Consumer1Out '"partitions":[0,1,2,3]' 2 22000
+  Wait-FilePatternCount $Consumer1Out '"partitions":[0,1,2,3]' ($fullAssignmentBeforeTakeover + 1) 22000
 
   for ($i = 0; $i -lt 4; ++$i) {
     $ProduceOutput = & $Producer --host $ExternalIp --port 9000 --token $BrokerToken --topic $CoordinatedTopic --message "live-takeover-$i"

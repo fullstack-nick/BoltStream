@@ -146,6 +146,20 @@ function Wait-FilePatternCount {
   throw "Timed out waiting for '$Text' count $MinimumCount in '$Path'. Content: $content"
 }
 
+function Get-FilePatternCount {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Text
+  )
+
+  $content = ""
+  if (Test-Path $Path) {
+    $raw = Get-Content -Raw $Path
+    if ($null -ne $raw) { $content = [string]$raw }
+  }
+  return [regex]::Matches($content, [regex]::Escape($Text)).Count
+}
+
 function Assert-LogContains {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -242,9 +256,10 @@ try {
   Wait-FileContains $Consumer2Out '"message":"share-2"' 10000
   Wait-FileContains $Consumer2Out '"message":"share-3"' 10000
 
+  $fullAssignmentBeforeTakeover = Get-FilePatternCount $Consumer1Out '"partitions":[0,1,2,3]'
   Stop-ProcessIfRunning -Process $consumer2
   $consumer2 = $null
-  Wait-FilePatternCount $Consumer1Out '"partitions":[0,1,2,3]' 2 20000
+  Wait-FilePatternCount $Consumer1Out '"partitions":[0,1,2,3]' ($fullAssignmentBeforeTakeover + 1) 20000
 
   for ($i = 0; $i -lt 4; ++$i) {
     $produced = Invoke-JsonTool $Producer @(
