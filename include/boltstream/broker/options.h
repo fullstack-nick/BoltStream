@@ -18,6 +18,7 @@ struct ServerOptions {
   Endpoint listen{"0.0.0.0", 9000};
   Endpoint admin_listen{"127.0.0.1", 9100};
   std::filesystem::path data_dir{"./data"};
+  std::uint32_t max_frame_bytes{1024 * 1024};
 };
 
 struct ParsedServerOptions {

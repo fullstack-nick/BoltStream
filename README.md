@@ -2,16 +2,18 @@
 
 BoltStream is a C++20 low-latency event streaming engine: a Kafka-inspired broker built from scratch to demonstrate Linux networking, durable storage, concurrency, testing, performance measurement, and cloud-native deployment.
 
-Phase 1 establishes the repository foundation: native Windows builds, Linux parity builds, an empty broker listener, admin health/version endpoints, CI artifacts, Terraform-managed GCP infrastructure, and SSH/systemd deployment.
+Phase 2 establishes the broker/client binary protocol and C++ async client library. Durable storage and real produce/fetch success paths are intentionally left for later phases.
 
-## Current Phase 1 Surface
+## Current Phase 2 Surface
 
 - `boltstream-server` opens broker TCP port `9000`.
 - Admin HTTP listens on `127.0.0.1:9100`.
 - `GET /health/live` reports process liveness.
 - `GET /health/ready` reports data-directory readiness.
-- `GET /version` reports service name, Git SHA, build type, compiler, protocol version `0`, storage format version `0`, and startup time.
-- `boltstream-producer`, `boltstream-consumer`, and `boltstream-bench` provide stable CLI shells; real produce/fetch protocol starts in Phase 2.
+- `GET /version` reports service name, Git SHA, build type, compiler, protocol version `1`, storage format version `0`, and startup time.
+- Broker TCP port `9000` accepts versioned binary frames with correlation ids and structured error responses.
+- `boltstream-producer` and `boltstream-consumer` use the C++ async client library and return structured `not_implemented` responses until durable produce/fetch behavior lands.
+- `boltstream-bench` remains a stable benchmark shell until real produce/fetch support exists.
 
 ## Native Windows Build
 
@@ -43,13 +45,26 @@ docker compose up --build
 curl.exe -fsS http://127.0.0.1:9100/health/live
 curl.exe -fsS http://127.0.0.1:9100/health/ready
 curl.exe -fsS http://127.0.0.1:9100/version
+.\build\windows-gcc-debug\boltstream-producer.exe --topic trades --key AAPL --message "AAPL,100,192.41"
+.\build\windows-gcc-debug\boltstream-consumer.exe --topic trades --from beginning
 ```
 
 Use `curl.exe` in PowerShell. Plain `curl` is a PowerShell alias.
 
+Producer and consumer currently return exit code `3` with `"status":"not_implemented"`.
+That is the expected Phase 2 result because storage-backed produce/fetch lands later.
+
+For a repeatable local smoke:
+
+```powershell
+.\scripts\smoke-phase2.ps1 -Preset windows-gcc-debug
+```
+
+See [docs/protocol.md](docs/protocol.md) for the binary frame layout.
+
 ## GCP Deployment
 
-BoltStream is deployed from Phase 1 to a dedicated GCP project:
+BoltStream is deployed to a dedicated GCP project:
 
 - Project: `boltstream-r7m5o9ld`
 - Account guard: `nickaccturk@gmail.com`
@@ -61,7 +76,9 @@ BoltStream is deployed from Phase 1 to a dedicated GCP project:
 
 See [docs/gcp.md](docs/gcp.md) and [docs/operations.md](docs/operations.md).
 
-## Phase 1 Proof
+## Phase Proof
 
-The durable acceptance record is [proof/phase-1.md](proof/phase-1.md). Phase 1 is complete only after local checks, GitHub push, CI artifact, Terraform apply, GCP deploy, live health/version calls, SSH log inspection, and clean post-apply Terraform drift check all pass.
-
+Durable acceptance records live under `proof/`. Phase 1 is recorded in
+[proof/phase-1.md](proof/phase-1.md), and Phase 2 is recorded in
+[proof/phase-2.md](proof/phase-2.md) after local checks, GitHub push, CI artifact, GCP
+deploy, live protocol calls, SSH log inspection, and runtime version verification pass.

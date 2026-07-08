@@ -89,7 +89,9 @@ endif()
 add_library(boltstream_core
   src/broker/options.cpp
   src/broker/server.cpp
-  src/common/build_info.cpp)
+  src/client/async_client.cpp
+  src/common/build_info.cpp
+  src/protocol/protocol.cpp)
 
 target_include_directories(boltstream_core
   PUBLIC
@@ -109,10 +111,10 @@ add_executable(boltstream-server src/tools/server_main.cpp)
 target_link_libraries(boltstream-server PRIVATE boltstream_core boltstream_warnings)
 
 add_executable(boltstream-producer tools/producer_cli.cpp)
-target_link_libraries(boltstream-producer PRIVATE boltstream_warnings)
+target_link_libraries(boltstream-producer PRIVATE boltstream_core boltstream_warnings)
 
 add_executable(boltstream-consumer tools/consumer_cli.cpp)
-target_link_libraries(boltstream-consumer PRIVATE boltstream_warnings)
+target_link_libraries(boltstream-consumer PRIVATE boltstream_core boltstream_warnings)
 
 add_executable(boltstream-bench tools/bench_cli.cpp)
 target_link_libraries(boltstream-bench PRIVATE boltstream_warnings)
@@ -138,7 +140,9 @@ if(BOLTSTREAM_BUILD_TESTS AND BUILD_TESTING)
 
   add_executable(boltstream_tests
     tests/build_info_tests.cpp
-    tests/options_tests.cpp)
+    tests/client_broker_tests.cpp
+    tests/options_tests.cpp
+    tests/protocol_tests.cpp)
   target_link_libraries(boltstream_tests PRIVATE boltstream_core GTest::gtest_main boltstream_warnings)
   include(GoogleTest)
   gtest_discover_tests(boltstream_tests)

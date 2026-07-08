@@ -22,6 +22,18 @@ bool parse_port(std::string_view text, std::uint16_t& port) {
   return true;
 }
 
+bool parse_u32(std::string_view text, std::uint32_t& value) {
+  std::uint32_t parsed{};
+  const auto* begin = text.data();
+  const auto* end = text.data() + text.size();
+  const auto result = std::from_chars(begin, end, parsed);
+  if (result.ec != std::errc{} || result.ptr != end || parsed == 0) {
+    return false;
+  }
+  value = parsed;
+  return true;
+}
+
 bool parse_endpoint(std::string_view text, Endpoint& endpoint) {
   const auto colon = text.rfind(':');
   if (colon == std::string_view::npos || colon == 0 || colon + 1 >= text.size()) {
@@ -82,6 +94,13 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
       parsed.options.listen.port = port;
     } else if (arg == "--data") {
       parsed.options.data_dir = std::filesystem::path{std::string{require_value(arg)}};
+    } else if (arg == "--max-frame-bytes") {
+      std::uint32_t max_frame_bytes{};
+      if (!parse_u32(require_value(arg), max_frame_bytes)) {
+        parsed.error = "invalid --max-frame-bytes value";
+        return parsed;
+      }
+      parsed.options.max_frame_bytes = max_frame_bytes;
     } else {
       parsed.error = "unknown argument: " + std::string{arg};
       return parsed;
@@ -93,12 +112,13 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
 
 std::string server_usage() {
   return "Usage: boltstream-server [--listen HOST:PORT] [--port PORT] "
-         "[--admin-listen HOST:PORT] [--data PATH]\n"
+         "[--admin-listen HOST:PORT] [--data PATH] [--max-frame-bytes BYTES]\n"
          "\n"
          "Defaults:\n"
          "  --listen 0.0.0.0:9000\n"
          "  --admin-listen 127.0.0.1:9100\n"
-         "  --data ./data\n";
+         "  --data ./data\n"
+         "  --max-frame-bytes 1048576\n";
 }
 
 std::string endpoint_to_string(const Endpoint& endpoint) {

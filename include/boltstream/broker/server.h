@@ -25,6 +25,8 @@ public:
 
   [[nodiscard]] bool ready() const { return ready_; }
   [[nodiscard]] std::string version_json() const;
+  [[nodiscard]] std::uint16_t broker_port() const;
+  [[nodiscard]] std::uint16_t admin_port() const;
 
 private:
   using Tcp = boost::asio::ip::tcp;

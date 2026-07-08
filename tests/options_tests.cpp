@@ -7,7 +7,7 @@
 
 using boltstream::broker::parse_server_options;
 
-TEST(OptionsTests, DefaultsMatchPhaseOneContract) {
+TEST(OptionsTests, DefaultsMatchPhaseTwoContract) {
   constexpr std::array<std::string_view, 0> args{};
 
   const auto parsed = parse_server_options(args);
@@ -18,13 +18,19 @@ TEST(OptionsTests, DefaultsMatchPhaseOneContract) {
   EXPECT_EQ(parsed.options.admin_listen.host, "127.0.0.1");
   EXPECT_EQ(parsed.options.admin_listen.port, 9100);
   EXPECT_EQ(parsed.options.data_dir.generic_string(), "./data");
+  EXPECT_EQ(parsed.options.max_frame_bytes, 1024U * 1024U);
 }
 
 TEST(OptionsTests, ParsesListenAdminPortAndData) {
   constexpr std::array args{
-      std::string_view{"--listen"},       std::string_view{"127.0.0.1:9001"},
-      std::string_view{"--admin-listen"}, std::string_view{"127.0.0.1:9101"},
-      std::string_view{"--data"},         std::string_view{"./tmp-data"},
+      std::string_view{"--listen"},
+      std::string_view{"127.0.0.1:9001"},
+      std::string_view{"--admin-listen"},
+      std::string_view{"127.0.0.1:9101"},
+      std::string_view{"--data"},
+      std::string_view{"./tmp-data"},
+      std::string_view{"--max-frame-bytes"},
+      std::string_view{"4096"},
   };
 
   const auto parsed = parse_server_options(args);
@@ -35,6 +41,7 @@ TEST(OptionsTests, ParsesListenAdminPortAndData) {
   EXPECT_EQ(parsed.options.admin_listen.host, "127.0.0.1");
   EXPECT_EQ(parsed.options.admin_listen.port, 9101);
   EXPECT_EQ(parsed.options.data_dir.generic_string(), "./tmp-data");
+  EXPECT_EQ(parsed.options.max_frame_bytes, 4096U);
 }
 
 TEST(OptionsTests, ParsesPortShortcut) {
