@@ -6,6 +6,7 @@
 .\scripts\toolchain-check.ps1
 .\scripts\build.ps1 -Preset windows-gcc-debug
 .\scripts\test.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase8.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase7.ps1 -Preset windows-gcc-debug
 .\scripts\format.ps1
 ```
@@ -26,7 +27,12 @@ Use `windows-msvc-debug` for the MSVC path and `windows-clang-debug` for the LLV
   --max-append-queue-depth 32 `
   --append-workers 2 `
   --max-broker-connections 128 `
-  --max-long-poll-waiters 128
+  --max-long-poll-waiters 128 `
+  --segment-bytes 268435456 `
+  --segment-max-age-seconds 3600 `
+  --retention-max-age-seconds 604800 `
+  --retention-max-bytes 1073741824 `
+  --retention-check-interval-ms 60000
 ```
 
 Admin endpoints:
@@ -50,6 +56,18 @@ Broker protocol smoke:
   --host 127.0.0.1 --port 9000 `
   --topic trades --group dashboard --commit --coordinated
 
+.\build\windows-gcc-debug\boltstream-admin.exe topics describe `
+  --host 127.0.0.1 --port 9000 `
+  --topic trades
+
+.\build\windows-gcc-debug\boltstream-admin.exe retention run `
+  --host 127.0.0.1 --port 9000 `
+  --topic trades
+
+.\build\windows-gcc-debug\boltstream-admin.exe groups describe `
+  --host 127.0.0.1 --port 9000 `
+  --group dashboard --topic trades
+
 .\build\windows-gcc-debug\boltstream-logtool.exe append `
   --data .\data `
   --topic trades `
@@ -72,6 +90,7 @@ Repeatable storage smoke:
 ```powershell
 .\scripts\smoke-phase6.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase7.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase8.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
 ```
@@ -90,6 +109,14 @@ Coordinated consumer group behavior:
 - The broker assigns contiguous partition ranges across sorted member ids and rebalances on join, leave, and session timeout.
 - Coordinated offset commits are fenced by member id, generation id, and partition ownership.
 - Runtime logs include `group_member_joined`, `group_rebalanced`, `group_member_expired`, `group_heartbeat`, `group_member_left`, `group_offset_committed`, and `group_offset_commit_rejected`.
+
+Retention and lifecycle behavior:
+
+- Retention deletes only inactive complete segments and preserves the active segment.
+- `beginning` fetches from the partition low watermark after retention.
+- Explicit or committed offsets below the low watermark return `offset_out_of_range`.
+- Topic deletion removes topic manifests, partition logs, indexes, and inactive group offsets.
+- Topic deletion and group offset reset reject active coordinated groups with `group_active`.
 
 ## Linux Service Layout
 

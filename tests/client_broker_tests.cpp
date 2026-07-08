@@ -1,6 +1,7 @@
 #include "boltstream/broker/server.h"
 #include "boltstream/build_info.h"
 #include "boltstream/client/async_client.h"
+#include "boltstream/storage/partition_log.h"
 
 #include <gtest/gtest.h>
 
@@ -307,6 +308,77 @@ group_offset_commit(std::uint16_t port,
       seen_error, timed_out);
 }
 
+boltstream::protocol::Frame list_topics(std::uint16_t port, boost::system::error_code& seen_error,
+                                        bool& timed_out) {
+  return run_single_request(
+      port,
+      [](boltstream::client::AsyncClient& client,
+         std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_list_topics(std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame describe_topic(std::uint16_t port, std::string_view topic,
+                                           boost::system::error_code& seen_error, bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_describe_topic({std::string{topic}}, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame run_retention(std::uint16_t port, std::string_view topic,
+                                          boost::system::error_code& seen_error, bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_run_retention({std::string{topic}}, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame delete_topic(std::uint16_t port, std::string_view topic,
+                                         boost::system::error_code& seen_error, bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_delete_topic({std::string{topic}}, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame describe_group(std::uint16_t port, std::string_view group,
+                                           std::string_view topic,
+                                           boost::system::error_code& seen_error, bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_describe_group({std::string{group}, std::string{topic}}, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame reset_group_offset(std::uint16_t port, std::string_view group,
+                                               std::string_view topic, std::uint16_t partition,
+                                               std::string_view to,
+                                               boost::system::error_code& seen_error,
+                                               bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_reset_group_offset(
+            {std::string{group}, std::string{topic}, partition, std::string{to}}, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
 boltstream::protocol::Frame metadata(std::uint16_t port, boost::system::error_code& seen_error,
                                      bool& timed_out) {
   return run_single_request(
@@ -489,6 +561,160 @@ TEST(ClientBrokerTests, MultiPartitionTopicRoutesRecordsAndReportsMetadata) {
     metadata_partitions.push_back(topic.partition);
   }
   EXPECT_EQ(metadata_partitions, (std::vector<std::uint16_t>{0, 1, 2}));
+}
+
+TEST(ClientBrokerTests, AdminLifecycleCommandsDescribeResetAndDeleteTopic) {
+  const auto data_dir = temp_path("boltstream-phase8-lifecycle");
+  auto running = start_server(data_dir);
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "phase8", 2, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
+  auto produced = produce(running->port, "phase8", "", "zero", seen_error, timed_out);
+  ASSERT_EQ(produced.header.frame_type, boltstream::protocol::FrameType::ProduceResponse);
+  produced = produce(running->port, "phase8", "", "one", seen_error, timed_out);
+  ASSERT_EQ(produced.header.frame_type, boltstream::protocol::FrameType::ProduceResponse);
+
+  auto committed = commit_offset(running->port, "dashboard", "phase8", 0, 1, seen_error, timed_out);
+  ASSERT_EQ(committed.header.frame_type, boltstream::protocol::FrameType::OffsetCommitResponse);
+
+  auto listed = list_topics(running->port, seen_error, timed_out);
+  ASSERT_EQ(listed.header.frame_type, boltstream::protocol::FrameType::ListTopicsResponse);
+  boltstream::protocol::ListTopicsResponse list_response;
+  auto decoded = boltstream::protocol::decode_list_topics_response(listed.payload, list_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  ASSERT_EQ(list_response.topics.size(), 1U);
+  EXPECT_EQ(list_response.topics[0].topic, "phase8");
+  EXPECT_EQ(list_response.topics[0].partition_count, 2U);
+
+  auto described = describe_topic(running->port, "phase8", seen_error, timed_out);
+  ASSERT_EQ(described.header.frame_type, boltstream::protocol::FrameType::DescribeTopicResponse);
+  boltstream::protocol::DescribeTopicResponse topic_response;
+  decoded = boltstream::protocol::decode_describe_topic_response(described.payload, topic_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(topic_response.topic.partitions.size(), 2U);
+
+  auto group = describe_group(running->port, "dashboard", "phase8", seen_error, timed_out);
+  ASSERT_EQ(group.header.frame_type, boltstream::protocol::FrameType::DescribeGroupResponse);
+  boltstream::protocol::DescribeGroupResponse group_response;
+  decoded = boltstream::protocol::decode_describe_group_response(group.payload, group_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  ASSERT_EQ(group_response.offsets.size(), 2U);
+  EXPECT_TRUE(group_response.offsets[0].has_committed_offset);
+  EXPECT_EQ(group_response.offsets[0].committed_offset, 1U);
+
+  auto reset = reset_group_offset(running->port, "dashboard", "phase8", 0, "beginning", seen_error,
+                                  timed_out);
+  ASSERT_EQ(reset.header.frame_type, boltstream::protocol::FrameType::ResetGroupOffsetResponse);
+  boltstream::protocol::ResetGroupOffsetResponse reset_response;
+  decoded = boltstream::protocol::decode_reset_group_offset_response(reset.payload, reset_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(reset_response.next_offset, 0U);
+
+  auto deleted = delete_topic(running->port, "phase8", seen_error, timed_out);
+  ASSERT_EQ(deleted.header.frame_type, boltstream::protocol::FrameType::DeleteTopicResponse);
+  boltstream::protocol::DeleteTopicResponse delete_response;
+  decoded = boltstream::protocol::decode_delete_topic_response(deleted.payload, delete_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(delete_response.status, "deleted");
+  EXPECT_GE(delete_response.segments_deleted, 1U);
+  EXPECT_GE(delete_response.offsets_removed, 1U);
+  EXPECT_FALSE(std::filesystem::exists(data_dir / "topics" / "phase8"));
+
+  auto fetch_deleted = fetch(running->port, "phase8", "beginning", seen_error, timed_out);
+  ASSERT_EQ(fetch_deleted.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
+  EXPECT_EQ(decode_error(fetch_deleted).code, boltstream::protocol::ErrorCode::UnknownTopic);
+
+  std::error_code ignored;
+  std::filesystem::remove_all(data_dir, ignored);
+}
+
+TEST(ClientBrokerTests, RetentionRunFreesInactiveSegmentsAndReportsOffsetOutOfRange) {
+  const auto data_dir = temp_path("boltstream-phase8-retention");
+  auto running = start_server(data_dir, [](auto& options) {
+    options.segment_bytes = 96;
+    options.segment_max_age_seconds = 0;
+    options.retention_max_age_seconds = 1;
+    options.retention_max_bytes = 0;
+    options.retention_check_interval_ms = 0;
+  });
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "retained", 1, seen_error, timed_out);
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+  for (int index = 0; index < 3; ++index) {
+    auto produced = produce(running->port, "retained", std::to_string(index),
+                            "message-00000000000000000000000000000000", seen_error, timed_out);
+    ASSERT_EQ(produced.header.frame_type, boltstream::protocol::FrameType::ProduceResponse);
+  }
+
+  const auto partition_dir = boltstream::storage::partition_directory(data_dir, "retained", 0);
+  std::vector<std::filesystem::path> logs;
+  for (const auto& entry : std::filesystem::directory_iterator(partition_dir)) {
+    if (entry.path().extension() == ".log") {
+      logs.push_back(entry.path());
+    }
+  }
+  std::sort(logs.begin(), logs.end());
+  ASSERT_GE(logs.size(), 3U);
+  for (std::size_t index = 0; index + 1 < logs.size(); ++index) {
+    std::filesystem::last_write_time(logs[index], std::filesystem::file_time_type::clock::now() -
+                                                      std::chrono::seconds(10));
+  }
+
+  auto retained = run_retention(running->port, "retained", seen_error, timed_out);
+  ASSERT_EQ(retained.header.frame_type, boltstream::protocol::FrameType::RunRetentionResponse);
+  boltstream::protocol::RunRetentionResponse retention_response;
+  auto decoded =
+      boltstream::protocol::decode_run_retention_response(retained.payload, retention_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(retention_response.topics_scanned, 1U);
+  EXPECT_GE(retention_response.segments_deleted, 2U);
+  ASSERT_EQ(retention_response.partitions.size(), 1U);
+  EXPECT_EQ(retention_response.partitions[0].earliest_offset, 2U);
+
+  auto too_old = fetch(running->port, "retained", "0", seen_error, timed_out);
+  ASSERT_EQ(too_old.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
+  EXPECT_EQ(decode_error(too_old).code, boltstream::protocol::ErrorCode::OffsetOutOfRange);
+
+  auto beginning = fetch(running->port, "retained", "beginning", seen_error, timed_out);
+  ASSERT_EQ(beginning.header.frame_type, boltstream::protocol::FrameType::FetchResponse);
+  boltstream::protocol::FetchResponse fetch_response;
+  decoded = boltstream::protocol::decode_fetch_response(beginning.payload, fetch_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(fetch_response.from_offset, 2U);
+  ASSERT_EQ(fetch_response.records.size(), 1U);
+  EXPECT_EQ(fetch_response.records[0].offset, 2U);
+
+  std::error_code ignored;
+  std::filesystem::remove_all(data_dir, ignored);
+}
+
+TEST(ClientBrokerTests, LifecycleCommandsRejectActiveCoordinatedGroups) {
+  const auto running = start_server();
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "activegroup", 2, seen_error, timed_out);
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
+  auto joined =
+      join_group(running->port, {"dashboard", "activegroup", "", 5000}, seen_error, timed_out);
+  ASSERT_EQ(joined.header.frame_type, boltstream::protocol::FrameType::JoinGroupResponse);
+
+  auto reset = reset_group_offset(running->port, "dashboard", "activegroup", 0, "beginning",
+                                  seen_error, timed_out);
+  ASSERT_EQ(reset.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
+  EXPECT_EQ(decode_error(reset).code, boltstream::protocol::ErrorCode::GroupActive);
+
+  auto deleted = delete_topic(running->port, "activegroup", seen_error, timed_out);
+  ASSERT_EQ(deleted.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
+  EXPECT_EQ(decode_error(deleted).code, boltstream::protocol::ErrorCode::GroupActive);
 }
 
 TEST(ClientBrokerTests, ConsumerGroupCommitSurvivesRestartAndResumes) {

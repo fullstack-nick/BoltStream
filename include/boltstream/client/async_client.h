@@ -142,6 +142,49 @@ public:
                          std::forward<CompletionToken>(token));
   }
 
+  template <typename CompletionToken> auto async_list_topics(CompletionToken&& token) {
+    return async_request(protocol::FrameType::ListTopicsRequest, {},
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_describe_topic(const protocol::DescribeTopicRequest& request,
+                            CompletionToken&& token) {
+    return async_request(protocol::FrameType::DescribeTopicRequest,
+                         protocol::encode_describe_topic_request(request),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_delete_topic(const protocol::DeleteTopicRequest& request, CompletionToken&& token) {
+    return async_request(protocol::FrameType::DeleteTopicRequest,
+                         protocol::encode_delete_topic_request(request),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_run_retention(const protocol::RunRetentionRequest& request, CompletionToken&& token) {
+    return async_request(protocol::FrameType::RunRetentionRequest,
+                         protocol::encode_run_retention_request(request),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_describe_group(const protocol::DescribeGroupRequest& request,
+                            CompletionToken&& token) {
+    return async_request(protocol::FrameType::DescribeGroupRequest,
+                         protocol::encode_describe_group_request(request),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_reset_group_offset(const protocol::ResetGroupOffsetRequest& request,
+                                CompletionToken&& token) {
+    return async_request(protocol::FrameType::ResetGroupOffsetRequest,
+                         protocol::encode_reset_group_offset_request(request),
+                         std::forward<CompletionToken>(token));
+  }
+
   void close();
 
 private:

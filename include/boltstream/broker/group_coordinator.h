@@ -55,6 +55,10 @@ public:
                          TimePoint now = Clock::now());
   bool has_active_members(std::string_view group, std::string_view topic,
                           TimePoint now = Clock::now());
+  std::size_t active_member_count(std::string_view group, std::string_view topic,
+                                  TimePoint now = Clock::now());
+  bool topic_has_active_members(std::string_view topic, TimePoint now = Clock::now());
+  void remove_topic(std::string_view topic);
 
 private:
   struct GroupKey {

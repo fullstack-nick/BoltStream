@@ -4,8 +4,8 @@ server:
 storage:
   data_dir: "/var/lib/boltstream"
 runtime:
-  phase: 6
-  protocol_version: 2
+  phase: 8
+  protocol_version: 4
   storage_format_version: 2
   max_frame_bytes: 1048576
   max_fetch_records: 100
@@ -15,3 +15,8 @@ runtime:
   append_workers: 2
   max_broker_connections: 128
   max_long_poll_waiters: 128
+  segment_bytes: 268435456
+  segment_max_age_seconds: 3600
+  retention_max_age_seconds: 604800
+  retention_max_bytes: 1073741824
+  retention_check_interval_ms: 60000

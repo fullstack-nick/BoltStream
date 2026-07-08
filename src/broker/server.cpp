@@ -343,6 +343,7 @@ class BrokerRuntime {
     std::string name;
     std::uint16_t partition_count{0};
     std::uint16_t next_round_robin_partition{0};
+    bool deleting{false};
     std::vector<std::shared_ptr<PartitionState>> partitions;
   };
 
@@ -364,6 +365,9 @@ public:
         max_append_queue_depth_(options.max_append_queue_depth),
         append_workers_configured_(options.append_workers),
         max_long_poll_waiters_(options.max_long_poll_waiters),
+        segment_bytes_(options.segment_bytes),
+        segment_max_age_seconds_(options.segment_max_age_seconds),
+        retention_policy_{options.retention_max_age_seconds, options.retention_max_bytes},
         broker_token_(std::move(broker_token)),
         offset_store_(storage::OffsetStore::open(data_dir_)) {
     start_append_workers();
@@ -449,32 +453,15 @@ public:
     job->executor = std::move(executor);
     job->completion = std::move(completion);
 
-    std::shared_ptr<TopicState::PartitionState> partition;
-    if (!job->request.key.empty()) {
-      const auto partition_id = key_hash_partition(job->request.key, topic->partition_count);
-      partition = topic->partitions.at(partition_id);
-      const auto enqueued = try_enqueue_append(partition, job);
-      if (!enqueued.accepted) {
-        write_structured_log(
-            {"warn",
-             "append_overloaded",
-             {},
-             {},
-             std::string{protocol::error_code_name(protocol::ErrorCode::Overloaded)},
-             "append queue is full",
-             std::nullopt,
-             std::nullopt,
-             protocol::is_retryable_error(protocol::ErrorCode::Overloaded),
-             enqueued.depth,
-             active_long_poll_waiters()});
-        throw BrokerRequestError{protocol::ErrorCode::Overloaded, "append queue is full"};
-      }
-      return;
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
     }
 
-    std::lock_guard topic_lock{topic->mutex};
-    const auto partition_id = topic->next_round_robin_partition;
-    partition = topic->partitions.at(partition_id);
+    const auto partition_id = job->request.key.empty()
+                                  ? topic->next_round_robin_partition
+                                  : key_hash_partition(job->request.key, topic->partition_count);
+    auto partition = topic->partitions.at(partition_id);
     const auto enqueued = try_enqueue_append(partition, job);
     if (!enqueued.accepted) {
       write_structured_log({"warn",
@@ -490,16 +477,23 @@ public:
                             active_long_poll_waiters()});
       throw BrokerRequestError{protocol::ErrorCode::Overloaded, "append queue is full"};
     }
-    topic->next_round_robin_partition = static_cast<std::uint16_t>(
-        (topic->next_round_robin_partition + 1U) % topic->partition_count);
+    if (job->request.key.empty()) {
+      topic->next_round_robin_partition = static_cast<std::uint16_t>(
+          (topic->next_round_robin_partition + 1U) % topic->partition_count);
+    }
   }
 
   protocol::FetchResponse fetch(const protocol::FetchRequest& request) const {
     auto topic = find_topic_or_throw(request.topic);
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
     auto partition = partition_or_throw(*topic, request.partition);
     std::lock_guard log_lock{partition->log_mutex};
+    const auto earliest_offset = partition->log.earliest_offset();
     const auto next_offset = partition->log.next_offset();
-    const auto from_offset = resolve_fetch_offset(request, next_offset);
+    const auto from_offset = resolve_fetch_offset(request, earliest_offset, next_offset);
 
     protocol::FetchResponse response;
     response.topic = request.topic;
@@ -541,6 +535,10 @@ public:
   protocol::OffsetCommitResponse commit_offset(const protocol::OffsetCommitRequest& request) {
     validate_group_or_throw(request.group);
     auto topic = find_topic_or_throw(request.topic);
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
     auto partition = partition_or_throw(*topic, request.partition);
     log_group_expirations(group_coordinator_.expire(request.group, request.topic));
     if (group_coordinator_.has_active_members(request.group, request.topic)) {
@@ -548,6 +546,11 @@ public:
                                "legacy offset commit is fenced by active coordinated group"};
     }
     std::lock_guard log_lock{partition->log_mutex};
+    const auto earliest_offset = partition->log.earliest_offset();
+    if (request.next_offset < earliest_offset) {
+      throw BrokerRequestError{protocol::ErrorCode::OffsetOutOfRange,
+                               "commit offset is below partition earliest offset"};
+    }
     if (request.next_offset > partition->log.next_offset()) {
       throw BrokerRequestError{protocol::ErrorCode::InvalidOffset,
                                "commit offset is beyond partition next offset"};
@@ -561,6 +564,10 @@ public:
   protocol::JoinGroupResponse join_group(const protocol::JoinGroupRequest& request) {
     validate_group_or_throw(request.group);
     auto topic = find_topic_or_throw(request.topic);
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
     GroupCoordinator::Result result;
     try {
       result = group_coordinator_.join(request.group, request.topic, request.member_id,
@@ -580,7 +587,11 @@ public:
 
   protocol::SyncGroupResponse sync_group(const protocol::SyncGroupRequest& request) {
     validate_group_or_throw(request.group);
-    (void)find_topic_or_throw(request.topic);
+    auto topic = find_topic_or_throw(request.topic);
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
     log_group_expirations(group_coordinator_.expire(request.group, request.topic));
     GroupCoordinator::Result result;
     try {
@@ -594,7 +605,11 @@ public:
 
   protocol::HeartbeatResponse heartbeat_group(const protocol::HeartbeatRequest& request) {
     validate_group_or_throw(request.group);
-    (void)find_topic_or_throw(request.topic);
+    auto topic = find_topic_or_throw(request.topic);
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
     log_group_expirations(group_coordinator_.expire(request.group, request.topic));
     GroupCoordinator::Result result;
     try {
@@ -609,7 +624,11 @@ public:
 
   protocol::LeaveGroupResponse leave_group(const protocol::LeaveGroupRequest& request) {
     validate_group_or_throw(request.group);
-    (void)find_topic_or_throw(request.topic);
+    auto topic = find_topic_or_throw(request.topic);
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
     log_group_expirations(group_coordinator_.expire(request.group, request.topic));
     GroupCoordinator::Result result;
     try {
@@ -629,8 +648,19 @@ public:
   commit_group_offset(const protocol::GroupOffsetCommitRequest& request) {
     validate_group_or_throw(request.group);
     auto topic = find_topic_or_throw(request.topic);
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
     auto partition = partition_or_throw(*topic, request.partition);
     std::lock_guard log_lock{partition->log_mutex};
+    const auto earliest_offset = partition->log.earliest_offset();
+    if (request.next_offset < earliest_offset) {
+      log_group_commit_rejected(request, protocol::ErrorCode::OffsetOutOfRange,
+                                "commit offset is below partition earliest offset");
+      throw BrokerRequestError{protocol::ErrorCode::OffsetOutOfRange,
+                               "commit offset is below partition earliest offset"};
+    }
     if (request.next_offset > partition->log.next_offset()) {
       log_group_commit_rejected(request, protocol::ErrorCode::InvalidOffset,
                                 "commit offset is beyond partition next offset");
@@ -667,6 +697,264 @@ public:
       }
     }
     return response;
+  }
+
+  protocol::ListTopicsResponse list_topics() const {
+    protocol::ListTopicsResponse response;
+    std::vector<std::shared_ptr<TopicState>> topics;
+    {
+      std::lock_guard topics_lock{topics_mutex_};
+      topics.reserve(topics_.size());
+      for (const auto& [_, topic] : topics_) {
+        topics.push_back(topic);
+      }
+    }
+
+    response.topics.reserve(topics.size());
+    for (const auto& topic : topics) {
+      try {
+        response.topics.push_back(describe_topic_state(*topic));
+      } catch (const BrokerRequestError&) {
+      }
+    }
+    return response;
+  }
+
+  protocol::DescribeTopicResponse
+  describe_topic(const protocol::DescribeTopicRequest& request) const {
+    if (!storage::is_valid_topic_name(request.topic)) {
+      throw BrokerRequestError{protocol::ErrorCode::MalformedPayload, "invalid topic name"};
+    }
+    const auto topic = find_topic_or_throw(request.topic);
+    return {describe_topic_state(*topic)};
+  }
+
+  protocol::RunRetentionResponse run_retention(std::string_view topic_filter) {
+    if (!topic_filter.empty() && !storage::is_valid_topic_name(topic_filter)) {
+      throw BrokerRequestError{protocol::ErrorCode::MalformedPayload, "invalid topic name"};
+    }
+
+    protocol::RunRetentionResponse response;
+    response.topic = std::string{topic_filter};
+    std::vector<std::shared_ptr<TopicState>> topics;
+    {
+      std::lock_guard topics_lock{topics_mutex_};
+      for (const auto& [name, topic] : topics_) {
+        if (!topic_filter.empty() && name != topic_filter) {
+          continue;
+        }
+        topics.push_back(topic);
+      }
+    }
+    if (!topic_filter.empty() && topics.empty()) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic does not exist"};
+    }
+
+    response.topics_scanned = static_cast<std::uint32_t>(topics.size());
+    for (const auto& topic : topics) {
+      std::lock_guard topic_lock{topic->mutex};
+      if (topic->deleting) {
+        continue;
+      }
+      for (const auto& partition : topic->partitions) {
+        std::lock_guard log_lock{partition->log_mutex};
+        const auto stats = partition->log.apply_retention(retention_policy_);
+        protocol::RetentionPartitionResult result;
+        result.topic = topic->name;
+        result.partition = partition->log.options().partition_id;
+        result.segments_deleted = static_cast<std::uint32_t>(stats.segments_deleted);
+        result.bytes_deleted = static_cast<std::uint64_t>(stats.bytes_deleted);
+        result.earliest_offset = stats.earliest_offset;
+        result.next_offset = stats.next_offset;
+        response.partitions.push_back(result);
+        ++response.partitions_scanned;
+        response.segments_deleted += result.segments_deleted;
+        response.bytes_deleted += result.bytes_deleted;
+      }
+    }
+
+    if (response.segments_deleted > 0) {
+      write_structured_log(
+          {"info",
+           "retention_applied",
+           {},
+           {},
+           {},
+           "topics_scanned=" + std::to_string(response.topics_scanned) +
+               " partitions_scanned=" + std::to_string(response.partitions_scanned) +
+               " segments_deleted=" + std::to_string(response.segments_deleted) +
+               " bytes_deleted=" + std::to_string(response.bytes_deleted),
+           std::nullopt,
+           std::nullopt,
+           std::nullopt,
+           std::nullopt,
+           active_long_poll_waiters()});
+    }
+    return response;
+  }
+
+  protocol::DeleteTopicResponse delete_topic(const protocol::DeleteTopicRequest& request) {
+    if (!storage::is_valid_topic_name(request.topic)) {
+      throw BrokerRequestError{protocol::ErrorCode::MalformedPayload, "invalid topic name"};
+    }
+    if (group_coordinator_.topic_has_active_members(request.topic)) {
+      throw BrokerRequestError{protocol::ErrorCode::GroupActive,
+                               "topic has active coordinated consumer group members"};
+    }
+
+    std::shared_ptr<TopicState> topic;
+    {
+      std::lock_guard topics_lock{topics_mutex_};
+      auto it = topics_.find(request.topic);
+      if (it == topics_.end()) {
+        throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic does not exist"};
+      }
+      topic = it->second;
+      {
+        std::lock_guard topic_lock{topic->mutex};
+        if (group_coordinator_.topic_has_active_members(request.topic)) {
+          throw BrokerRequestError{protocol::ErrorCode::GroupActive,
+                                   "topic has active coordinated consumer group members"};
+        }
+        topic->deleting = true;
+      }
+      topics_.erase(it);
+    }
+
+    notify_fetch_waiters(request.topic);
+    wait_for_topic_appends_to_drain(*topic);
+
+    protocol::DeleteTopicResponse response;
+    response.topic = request.topic;
+    response.status = "deleted";
+    response.partitions_deleted = topic->partition_count;
+    for (const auto& partition : topic->partitions) {
+      std::lock_guard log_lock{partition->log_mutex};
+      const auto summaries = partition->log.segment_summaries();
+      response.segments_deleted += static_cast<std::uint32_t>(summaries.size());
+      for (const auto& summary : summaries) {
+        response.bytes_deleted += static_cast<std::uint64_t>(summary.log_bytes);
+      }
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(topic_directory(data_dir_, request.topic), ec);
+    if (ec) {
+      throw BrokerRequestError{protocol::ErrorCode::InternalError,
+                               "failed to delete topic directory: " + ec.message()};
+    }
+
+    {
+      std::lock_guard offset_lock{offsets_mutex_};
+      const auto offsets = offset_store_.remove_topic(request.topic);
+      response.offsets_removed = static_cast<std::uint32_t>(offsets.offsets_removed);
+    }
+    group_coordinator_.remove_topic(request.topic);
+    write_structured_log({"info",
+                          "topic_deleted",
+                          {},
+                          {},
+                          {},
+                          "topic=" + request.topic +
+                              " partitions_deleted=" + std::to_string(response.partitions_deleted) +
+                              " segments_deleted=" + std::to_string(response.segments_deleted) +
+                              " bytes_deleted=" + std::to_string(response.bytes_deleted) +
+                              " offsets_removed=" + std::to_string(response.offsets_removed),
+                          std::nullopt,
+                          std::nullopt,
+                          std::nullopt,
+                          std::nullopt,
+                          active_long_poll_waiters()});
+    return response;
+  }
+
+  protocol::DescribeGroupResponse describe_group(const protocol::DescribeGroupRequest& request) {
+    validate_group_or_throw(request.group);
+    auto topic = find_topic_or_throw(request.topic);
+    protocol::DescribeGroupResponse response;
+    response.group = request.group;
+    response.topic = request.topic;
+    response.active_member_count = static_cast<std::uint32_t>(
+        group_coordinator_.active_member_count(request.group, request.topic));
+
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
+    response.offsets.reserve(topic->partitions.size());
+    for (const auto& partition : topic->partitions) {
+      std::lock_guard log_lock{partition->log_mutex};
+      protocol::GroupOffsetDescription offset;
+      offset.partition = partition->log.options().partition_id;
+      offset.earliest_offset = partition->log.earliest_offset();
+      offset.next_offset = partition->log.next_offset();
+      {
+        std::lock_guard offset_lock{offsets_mutex_};
+        const auto committed =
+            offset_store_.committed(request.group, request.topic, offset.partition);
+        if (committed) {
+          offset.has_committed_offset = true;
+          offset.committed_offset = *committed;
+        }
+      }
+      offset.out_of_range =
+          offset.has_committed_offset && (offset.committed_offset < offset.earliest_offset ||
+                                          offset.committed_offset > offset.next_offset);
+      if (offset.has_committed_offset && !offset.out_of_range &&
+          offset.committed_offset <= offset.next_offset) {
+        offset.lag = offset.next_offset - offset.committed_offset;
+      } else {
+        offset.lag = offset.next_offset - offset.earliest_offset;
+      }
+      response.offsets.push_back(offset);
+    }
+    return response;
+  }
+
+  protocol::ResetGroupOffsetResponse
+  reset_group_offset(const protocol::ResetGroupOffsetRequest& request) {
+    validate_group_or_throw(request.group);
+    if (group_coordinator_.has_active_members(request.group, request.topic)) {
+      throw BrokerRequestError{protocol::ErrorCode::GroupActive,
+                               "consumer group has active members"};
+    }
+    auto topic = find_topic_or_throw(request.topic);
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
+    if (group_coordinator_.has_active_members(request.group, request.topic)) {
+      throw BrokerRequestError{protocol::ErrorCode::GroupActive,
+                               "consumer group has active members"};
+    }
+    auto partition = partition_or_throw(*topic, request.partition);
+    std::lock_guard log_lock{partition->log_mutex};
+    const auto earliest_offset = partition->log.earliest_offset();
+    const auto next_offset = partition->log.next_offset();
+
+    std::uint64_t target = 0;
+    if (request.to == "beginning") {
+      target = earliest_offset;
+    } else if (request.to == "latest") {
+      target = next_offset;
+    } else if (!parse_u64(request.to, target)) {
+      throw BrokerRequestError{protocol::ErrorCode::MalformedPayload,
+                               "reset target must be beginning, latest, or an unsigned offset"};
+    }
+    if (target < earliest_offset) {
+      throw BrokerRequestError{protocol::ErrorCode::OffsetOutOfRange,
+                               "reset target is below partition earliest offset"};
+    }
+    if (target > next_offset) {
+      throw BrokerRequestError{protocol::ErrorCode::InvalidOffset,
+                               "reset target is beyond partition next offset"};
+    }
+
+    {
+      std::lock_guard offset_lock{offsets_mutex_};
+      offset_store_.commit(request.group, request.topic, request.partition, target);
+    }
+    return {request.group, request.topic, request.partition, target, "reset"};
   }
 
   [[nodiscard]] std::uint32_t max_frame_bytes() const { return max_frame_bytes_; }
@@ -852,6 +1140,21 @@ private:
       result.response.offset = metadata.offset;
       result.response.next_offset = partition->log.next_offset();
       result.response.encoded_byte_size = metadata.encoded_byte_size;
+      const auto retention = partition->log.apply_retention(retention_policy_);
+      if (retention.segments_deleted > 0) {
+        write_structured_log({"info",
+                              "retention_applied",
+                              {},
+                              {},
+                              {},
+                              "segments_deleted=" + std::to_string(retention.segments_deleted) +
+                                  " bytes_deleted=" + std::to_string(retention.bytes_deleted),
+                              std::nullopt,
+                              std::nullopt,
+                              std::nullopt,
+                              std::nullopt,
+                              active_long_poll_waiters()});
+      }
     } catch (const std::exception& error) {
       result.ok = false;
       result.error = protocol::ErrorCode::InternalError;
@@ -892,6 +1195,50 @@ private:
     }
   }
 
+  protocol::TopicDescription describe_topic_state(const TopicState& topic) const {
+    std::lock_guard topic_lock{topic.mutex};
+    if (topic.deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
+
+    protocol::TopicDescription description;
+    description.topic = topic.name;
+    description.partition_count = topic.partition_count;
+    description.partitions.reserve(topic.partitions.size());
+    for (const auto& partition : topic.partitions) {
+      std::lock_guard log_lock{partition->log_mutex};
+      protocol::TopicPartitionDescription partition_description;
+      partition_description.partition = partition->log.options().partition_id;
+      partition_description.earliest_offset = partition->log.earliest_offset();
+      partition_description.next_offset = partition->log.next_offset();
+      const auto summaries = partition->log.segment_summaries();
+      partition_description.segment_count = static_cast<std::uint32_t>(summaries.size());
+      for (const auto& summary : summaries) {
+        partition_description.log_bytes += static_cast<std::uint64_t>(summary.log_bytes);
+      }
+      description.log_bytes += partition_description.log_bytes;
+      description.partitions.push_back(partition_description);
+    }
+    return description;
+  }
+
+  static void wait_for_topic_appends_to_drain(const TopicState& topic) {
+    for (;;) {
+      bool drained = true;
+      for (const auto& partition : topic.partitions) {
+        std::lock_guard lock{partition->append_mutex};
+        if (partition->append_active || !partition->pending_appends.empty()) {
+          drained = false;
+          break;
+        }
+      }
+      if (drained) {
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+
   std::shared_ptr<TopicState> open_topic_state(std::string_view topic_name,
                                                std::uint16_t partition_count) const {
     auto topic = std::make_shared<TopicState>();
@@ -900,7 +1247,7 @@ private:
     topic->partitions.reserve(partition_count);
     for (std::uint16_t partition = 0; partition < partition_count; ++partition) {
       auto log = storage::PartitionLog::open(
-          {data_dir_, topic->name, partition, storage::kDefaultMaxSegmentBytes});
+          {data_dir_, topic->name, partition, segment_bytes_, segment_max_age_seconds_});
       topic->partitions.push_back(std::make_shared<TopicState::PartitionState>(std::move(log)));
     }
     return topic;
@@ -942,9 +1289,10 @@ private:
   }
 
   [[nodiscard]] std::uint64_t resolve_fetch_offset(const protocol::FetchRequest& request,
+                                                   std::uint64_t earliest_offset,
                                                    std::uint64_t next_offset) const {
     if (request.from == "beginning") {
-      return 0;
+      return earliest_offset;
     }
     if (request.from == "latest") {
       return next_offset;
@@ -952,7 +1300,18 @@ private:
     if (request.from == "committed") {
       validate_group_or_throw(request.group);
       std::lock_guard offset_lock{offsets_mutex_};
-      return offset_store_.committed(request.group, request.topic, request.partition).value_or(0);
+      const auto committed =
+          offset_store_.committed(request.group, request.topic, request.partition)
+              .value_or(earliest_offset);
+      if (committed < earliest_offset) {
+        throw BrokerRequestError{protocol::ErrorCode::OffsetOutOfRange,
+                                 "committed offset is below partition earliest offset"};
+      }
+      if (committed > next_offset) {
+        throw BrokerRequestError{protocol::ErrorCode::InvalidOffset,
+                                 "committed offset is beyond partition next offset"};
+      }
+      return committed;
     }
 
     std::uint64_t from_offset = 0;
@@ -960,6 +1319,10 @@ private:
       throw BrokerRequestError{
           protocol::ErrorCode::MalformedPayload,
           "fetch offset selector must be beginning, latest, committed, or an unsigned offset"};
+    }
+    if (from_offset < earliest_offset) {
+      throw BrokerRequestError{protocol::ErrorCode::OffsetOutOfRange,
+                               "fetch offset is below partition earliest offset"};
     }
     if (from_offset > next_offset) {
       throw BrokerRequestError{protocol::ErrorCode::InvalidOffset,
@@ -986,6 +1349,27 @@ private:
       active_long_poll_waiters_ -= static_cast<std::uint32_t>(
           std::min<std::size_t>(waiters.size(), active_long_poll_waiters_));
       waiters_.erase(existing);
+    }
+    for (auto& waiter : waiters) {
+      waiter.callback();
+    }
+  }
+
+  void notify_fetch_waiters(std::string_view topic) {
+    std::vector<FetchWaiter> waiters;
+    {
+      std::lock_guard lock{waiters_mutex_};
+      for (auto it = waiters_.begin(); it != waiters_.end();) {
+        if (it->first.topic != topic) {
+          ++it;
+          continue;
+        }
+        waiters.insert(waiters.end(), std::make_move_iterator(it->second.begin()),
+                       std::make_move_iterator(it->second.end()));
+        active_long_poll_waiters_ -= static_cast<std::uint32_t>(
+            std::min<std::size_t>(it->second.size(), active_long_poll_waiters_));
+        it = waiters_.erase(it);
+      }
     }
     for (auto& waiter : waiters) {
       waiter.callback();
@@ -1066,6 +1450,9 @@ private:
   std::uint32_t max_append_queue_depth_;
   std::uint32_t append_workers_configured_;
   std::uint32_t max_long_poll_waiters_;
+  std::uintmax_t segment_bytes_;
+  std::uint64_t segment_max_age_seconds_;
+  storage::RetentionPolicy retention_policy_;
   std::string broker_token_;
   mutable std::mutex topics_mutex_;
   std::map<std::string, std::shared_ptr<TopicState>> topics_;
@@ -1235,6 +1622,24 @@ private:
       return;
     case protocol::FrameType::GroupOffsetCommitRequest:
       handle_group_offset_commit(std::move(frame));
+      return;
+    case protocol::FrameType::ListTopicsRequest:
+      handle_list_topics(std::move(frame));
+      return;
+    case protocol::FrameType::DescribeTopicRequest:
+      handle_describe_topic(std::move(frame));
+      return;
+    case protocol::FrameType::DeleteTopicRequest:
+      handle_delete_topic(std::move(frame));
+      return;
+    case protocol::FrameType::RunRetentionRequest:
+      handle_run_retention(std::move(frame));
+      return;
+    case protocol::FrameType::DescribeGroupRequest:
+      handle_describe_group(std::move(frame));
+      return;
+    case protocol::FrameType::ResetGroupOffsetRequest:
+      handle_reset_group_offset(std::move(frame));
       return;
     default:
       write_error(frame.header.correlation_id, protocol::ErrorCode::UnsupportedRequest,
@@ -1689,6 +2094,184 @@ private:
     }
   }
 
+  void handle_list_topics(protocol::Frame frame) {
+    const auto validation = protocol::validate_empty_payload(frame.payload);
+    if (!validation.ok) {
+      write_error(frame.header.correlation_id, validation.error, validation.message, true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.list_topics();
+      const auto payload = protocol::encode_list_topics_response(response);
+      write_frame(protocol::FrameType::ListTopicsResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_describe_topic(protocol::Frame frame) {
+    protocol::DescribeTopicRequest request;
+    const auto decoded = protocol::decode_describe_topic_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.describe_topic(request);
+      const auto payload = protocol::encode_describe_topic_response(response);
+      write_frame(protocol::FrameType::DescribeTopicResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_delete_topic(protocol::Frame frame) {
+    protocol::DeleteTopicRequest request;
+    const auto decoded = protocol::decode_delete_topic_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.delete_topic(request);
+      const auto payload = protocol::encode_delete_topic_response(response);
+      write_frame(protocol::FrameType::DeleteTopicResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_run_retention(protocol::Frame frame) {
+    protocol::RunRetentionRequest request;
+    const auto decoded = protocol::decode_run_retention_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!request.topic.empty() && !storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.run_retention(request.topic);
+      const auto payload = protocol::encode_run_retention_response(response);
+      write_frame(protocol::FrameType::RunRetentionResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_describe_group(protocol::Frame frame) {
+    protocol::DescribeGroupRequest request;
+    const auto decoded = protocol::decode_describe_group_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_group_name(request.group)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InvalidGroup,
+                  "invalid consumer group name", true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.describe_group(request);
+      const auto payload = protocol::encode_describe_group_response(response);
+      write_frame(protocol::FrameType::DescribeGroupResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_reset_group_offset(protocol::Frame frame) {
+    protocol::ResetGroupOffsetRequest request;
+    const auto decoded = protocol::decode_reset_group_offset_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_group_name(request.group)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InvalidGroup,
+                  "invalid consumer group name", true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.reset_group_offset(request);
+      const auto payload = protocol::encode_reset_group_offset_response(response);
+      write_frame(protocol::FrameType::ResetGroupOffsetResponse, frame.header.correlation_id,
+                  payload, false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
   void handle_empty_not_implemented(protocol::Frame frame, std::string_view message) {
     const auto validation = protocol::validate_empty_payload(frame.payload);
     if (!validation.ok) {
@@ -1803,6 +2386,7 @@ std::string utc_now_iso8601() {
 BrokerServer::BrokerServer(ServerOptions options, BuildInfo build_info)
     : options_(std::move(options)), build_info_(std::move(build_info)),
       startup_time_utc_(utc_now_iso8601()), broker_acceptor_(io_), admin_acceptor_(io_),
+      retention_timer_(io_),
       runtime_(std::make_unique<BrokerRuntime>(options_, broker_token_from_environment())) {}
 
 BrokerServer::~BrokerServer() { stop(); }
@@ -1823,6 +2407,7 @@ void BrokerServer::start() {
   stopping_ = false;
   accept_broker_client();
   accept_admin_client();
+  schedule_retention();
 
   write_structured_log({"info",
                         "server_listening",
@@ -1846,6 +2431,7 @@ void BrokerServer::stop() {
   boost::system::error_code ignored;
   broker_acceptor_.close(ignored);
   admin_acceptor_.close(ignored);
+  retention_timer_.cancel();
   io_.stop();
 }
 
@@ -1909,22 +2495,26 @@ void BrokerServer::prepare_data_directory() {
 
   try {
     const auto summary = runtime_->load_existing_topics();
-    write_structured_log({"info",
-                          "storage_recovery",
-                          {},
-                          {},
-                          {},
-                          "topics=" + std::to_string(summary.topics_recovered) +
-                              " partitions=" + std::to_string(summary.partitions_recovered) +
-                              " segments=" + std::to_string(summary.segments_scanned) +
-                              " indexes_rebuilt=" + std::to_string(summary.indexes_rebuilt) +
-                              " records=" + std::to_string(summary.records_recovered) +
-                              " bytes_truncated=" + std::to_string(summary.bytes_truncated),
-                          std::nullopt,
-                          std::nullopt,
-                          std::nullopt,
-                          std::nullopt,
-                          runtime_->active_long_poll_waiters()});
+    const auto retention = runtime_->run_retention({});
+    write_structured_log(
+        {"info",
+         "storage_recovery",
+         {},
+         {},
+         {},
+         "topics=" + std::to_string(summary.topics_recovered) +
+             " partitions=" + std::to_string(summary.partitions_recovered) +
+             " segments=" + std::to_string(summary.segments_scanned) +
+             " indexes_rebuilt=" + std::to_string(summary.indexes_rebuilt) +
+             " records=" + std::to_string(summary.records_recovered) +
+             " bytes_truncated=" + std::to_string(summary.bytes_truncated) +
+             " retention_segments_deleted=" + std::to_string(retention.segments_deleted) +
+             " retention_bytes_deleted=" + std::to_string(retention.bytes_deleted),
+         std::nullopt,
+         std::nullopt,
+         std::nullopt,
+         std::nullopt,
+         runtime_->active_long_poll_waiters()});
   } catch (const std::exception& error) {
     ready_ = false;
     ready_detail_ = "storage recovery failed: " + std::string{error.what()};
@@ -1933,6 +2523,35 @@ void BrokerServer::prepare_data_directory() {
 
   ready_ = true;
   ready_detail_ = "ready";
+}
+
+void BrokerServer::schedule_retention() {
+  if (options_.retention_check_interval_ms == 0 || stopping_) {
+    return;
+  }
+  retention_timer_.expires_after(std::chrono::milliseconds(options_.retention_check_interval_ms));
+  retention_timer_.async_wait([this](const boost::system::error_code& ec) {
+    if (ec || stopping_) {
+      return;
+    }
+    try {
+      (void)runtime_->run_retention({});
+    } catch (const std::exception& error) {
+      write_structured_log(
+          {"error",
+           "retention_failed",
+           {},
+           {},
+           std::string{protocol::error_code_name(protocol::ErrorCode::InternalError)},
+           error.what(),
+           std::nullopt,
+           std::nullopt,
+           std::nullopt,
+           std::nullopt,
+           runtime_->active_long_poll_waiters()});
+    }
+    schedule_retention();
+  });
 }
 
 void BrokerServer::accept_broker_client() {

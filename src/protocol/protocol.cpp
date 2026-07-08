@@ -131,6 +131,60 @@ DecodeResult error_result(ErrorCode code, std::string message) {
   return result;
 }
 
+void write_bool(std::vector<std::uint8_t>& out, bool value) { write_u32(out, value ? 1U : 0U); }
+
+bool read_bool(PayloadReader& reader, bool& value) {
+  std::uint32_t encoded = 0;
+  if (!reader.read_u32(encoded) || encoded > 1U) {
+    return false;
+  }
+  value = encoded == 1U;
+  return true;
+}
+
+void write_topic_partition_description(std::vector<std::uint8_t>& out,
+                                       const TopicPartitionDescription& partition) {
+  write_u16(out, partition.partition);
+  write_u64(out, partition.earliest_offset);
+  write_u64(out, partition.next_offset);
+  write_u32(out, partition.segment_count);
+  write_u64(out, partition.log_bytes);
+}
+
+bool read_topic_partition_description(PayloadReader& reader, TopicPartitionDescription& partition) {
+  return reader.read_u16(partition.partition) && reader.read_u64(partition.earliest_offset) &&
+         reader.read_u64(partition.next_offset) && reader.read_u32(partition.segment_count) &&
+         reader.read_u64(partition.log_bytes);
+}
+
+void write_topic_description(std::vector<std::uint8_t>& out, const TopicDescription& topic) {
+  write_string(out, topic.topic);
+  write_u16(out, topic.partition_count);
+  write_u64(out, topic.log_bytes);
+  write_u32(out, static_cast<std::uint32_t>(topic.partitions.size()));
+  for (const auto& partition : topic.partitions) {
+    write_topic_partition_description(out, partition);
+  }
+}
+
+bool read_topic_description(PayloadReader& reader, TopicDescription& topic) {
+  std::uint32_t partition_count = 0;
+  if (!reader.read_string(topic.topic) || !reader.read_u16(topic.partition_count) ||
+      !reader.read_u64(topic.log_bytes) || !reader.read_u32(partition_count)) {
+    return false;
+  }
+  topic.partitions.clear();
+  topic.partitions.reserve(partition_count);
+  for (std::uint32_t index = 0; index < partition_count; ++index) {
+    TopicPartitionDescription partition;
+    if (!read_topic_partition_description(reader, partition)) {
+      return false;
+    }
+    topic.partitions.push_back(partition);
+  }
+  return true;
+}
+
 } // namespace
 
 std::string_view frame_type_name(FrameType frame_type) {
@@ -185,6 +239,30 @@ std::string_view frame_type_name(FrameType frame_type) {
     return "group_offset_commit_request";
   case FrameType::GroupOffsetCommitResponse:
     return "group_offset_commit_response";
+  case FrameType::ListTopicsRequest:
+    return "list_topics_request";
+  case FrameType::ListTopicsResponse:
+    return "list_topics_response";
+  case FrameType::DescribeTopicRequest:
+    return "describe_topic_request";
+  case FrameType::DescribeTopicResponse:
+    return "describe_topic_response";
+  case FrameType::DeleteTopicRequest:
+    return "delete_topic_request";
+  case FrameType::DeleteTopicResponse:
+    return "delete_topic_response";
+  case FrameType::RunRetentionRequest:
+    return "run_retention_request";
+  case FrameType::RunRetentionResponse:
+    return "run_retention_response";
+  case FrameType::DescribeGroupRequest:
+    return "describe_group_request";
+  case FrameType::DescribeGroupResponse:
+    return "describe_group_response";
+  case FrameType::ResetGroupOffsetRequest:
+    return "reset_group_offset_request";
+  case FrameType::ResetGroupOffsetResponse:
+    return "reset_group_offset_response";
   }
   return "unknown";
 }
@@ -227,6 +305,10 @@ std::string_view error_code_name(ErrorCode error_code) {
     return "rebalance_required";
   case ErrorCode::StaleMember:
     return "stale_member";
+  case ErrorCode::OffsetOutOfRange:
+    return "offset_out_of_range";
+  case ErrorCode::GroupActive:
+    return "group_active";
   }
   return "unknown_error";
 }
@@ -249,6 +331,12 @@ bool is_request_type(FrameType frame_type) {
   case FrameType::HeartbeatRequest:
   case FrameType::LeaveGroupRequest:
   case FrameType::GroupOffsetCommitRequest:
+  case FrameType::ListTopicsRequest:
+  case FrameType::DescribeTopicRequest:
+  case FrameType::DeleteTopicRequest:
+  case FrameType::RunRetentionRequest:
+  case FrameType::DescribeGroupRequest:
+  case FrameType::ResetGroupOffsetRequest:
     return true;
   default:
     return false;
@@ -327,7 +415,7 @@ HeaderDecodeResult decode_header(std::span<const std::uint8_t> bytes,
   }
   if (result.header.flags != 0) {
     result.error = ErrorCode::ReservedFlags;
-    result.message = "reserved frame flags are not supported in protocol version 3";
+    result.message = "reserved frame flags are not supported in protocol version 4";
     return result;
   }
 
@@ -873,6 +961,291 @@ DecodeResult decode_group_offset_commit_response(std::span<const std::uint8_t> p
       !reader.done()) {
     return error_result(ErrorCode::MalformedPayload,
                         "malformed group-offset-commit response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_list_topics_response(const ListTopicsResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_u32(out, static_cast<std::uint32_t>(response.topics.size()));
+  for (const auto& topic : response.topics) {
+    write_topic_description(out, topic);
+  }
+  return out;
+}
+
+DecodeResult decode_list_topics_response(std::span<const std::uint8_t> payload,
+                                         ListTopicsResponse& response) {
+  PayloadReader reader{payload};
+  std::uint32_t topic_count = 0;
+  if (!reader.read_u32(topic_count)) {
+    return error_result(ErrorCode::MalformedPayload, "malformed list-topics response payload");
+  }
+  response.topics.clear();
+  response.topics.reserve(topic_count);
+  for (std::uint32_t index = 0; index < topic_count; ++index) {
+    TopicDescription topic;
+    if (!read_topic_description(reader, topic)) {
+      return error_result(ErrorCode::MalformedPayload, "malformed list-topics response payload");
+    }
+    response.topics.push_back(std::move(topic));
+  }
+  if (!reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed list-topics response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_describe_topic_request(const DescribeTopicRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.topic);
+  return out;
+}
+
+DecodeResult decode_describe_topic_request(std::span<const std::uint8_t> payload,
+                                           DescribeTopicRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.topic) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed describe-topic request payload");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "describe-topic topic must not be empty");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_describe_topic_response(const DescribeTopicResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_topic_description(out, response.topic);
+  return out;
+}
+
+DecodeResult decode_describe_topic_response(std::span<const std::uint8_t> payload,
+                                            DescribeTopicResponse& response) {
+  PayloadReader reader{payload};
+  if (!read_topic_description(reader, response.topic) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed describe-topic response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_delete_topic_request(const DeleteTopicRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.topic);
+  return out;
+}
+
+DecodeResult decode_delete_topic_request(std::span<const std::uint8_t> payload,
+                                         DeleteTopicRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.topic) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed delete-topic request payload");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "delete-topic topic must not be empty");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_delete_topic_response(const DeleteTopicResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.topic);
+  write_string(out, response.status);
+  write_u16(out, response.partitions_deleted);
+  write_u32(out, response.segments_deleted);
+  write_u64(out, response.bytes_deleted);
+  write_u32(out, response.offsets_removed);
+  return out;
+}
+
+DecodeResult decode_delete_topic_response(std::span<const std::uint8_t> payload,
+                                          DeleteTopicResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.topic) || !reader.read_string(response.status) ||
+      !reader.read_u16(response.partitions_deleted) ||
+      !reader.read_u32(response.segments_deleted) || !reader.read_u64(response.bytes_deleted) ||
+      !reader.read_u32(response.offsets_removed) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed delete-topic response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_run_retention_request(const RunRetentionRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.topic);
+  return out;
+}
+
+DecodeResult decode_run_retention_request(std::span<const std::uint8_t> payload,
+                                          RunRetentionRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.topic) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed run-retention request payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_run_retention_response(const RunRetentionResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.topic);
+  write_u32(out, response.topics_scanned);
+  write_u32(out, response.partitions_scanned);
+  write_u32(out, response.segments_deleted);
+  write_u64(out, response.bytes_deleted);
+  write_u32(out, static_cast<std::uint32_t>(response.partitions.size()));
+  for (const auto& partition : response.partitions) {
+    write_string(out, partition.topic);
+    write_u16(out, partition.partition);
+    write_u32(out, partition.segments_deleted);
+    write_u64(out, partition.bytes_deleted);
+    write_u64(out, partition.earliest_offset);
+    write_u64(out, partition.next_offset);
+  }
+  return out;
+}
+
+DecodeResult decode_run_retention_response(std::span<const std::uint8_t> payload,
+                                           RunRetentionResponse& response) {
+  PayloadReader reader{payload};
+  std::uint32_t partition_count = 0;
+  if (!reader.read_string(response.topic) || !reader.read_u32(response.topics_scanned) ||
+      !reader.read_u32(response.partitions_scanned) ||
+      !reader.read_u32(response.segments_deleted) || !reader.read_u64(response.bytes_deleted) ||
+      !reader.read_u32(partition_count)) {
+    return error_result(ErrorCode::MalformedPayload, "malformed run-retention response payload");
+  }
+  response.partitions.clear();
+  response.partitions.reserve(partition_count);
+  for (std::uint32_t index = 0; index < partition_count; ++index) {
+    RetentionPartitionResult partition;
+    if (!reader.read_string(partition.topic) || !reader.read_u16(partition.partition) ||
+        !reader.read_u32(partition.segments_deleted) || !reader.read_u64(partition.bytes_deleted) ||
+        !reader.read_u64(partition.earliest_offset) || !reader.read_u64(partition.next_offset)) {
+      return error_result(ErrorCode::MalformedPayload, "malformed run-retention response payload");
+    }
+    response.partitions.push_back(std::move(partition));
+  }
+  if (!reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed run-retention response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_describe_group_request(const DescribeGroupRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.group);
+  write_string(out, request.topic);
+  return out;
+}
+
+DecodeResult decode_describe_group_request(std::span<const std::uint8_t> payload,
+                                           DescribeGroupRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.group) || !reader.read_string(request.topic) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed describe-group request payload");
+  }
+  if (request.group.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "describe-group group must not be empty");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "describe-group topic must not be empty");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_describe_group_response(const DescribeGroupResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.group);
+  write_string(out, response.topic);
+  write_u32(out, response.active_member_count);
+  write_u32(out, static_cast<std::uint32_t>(response.offsets.size()));
+  for (const auto& offset : response.offsets) {
+    write_u16(out, offset.partition);
+    write_bool(out, offset.has_committed_offset);
+    write_u64(out, offset.committed_offset);
+    write_u64(out, offset.earliest_offset);
+    write_u64(out, offset.next_offset);
+    write_u64(out, offset.lag);
+    write_bool(out, offset.out_of_range);
+  }
+  return out;
+}
+
+DecodeResult decode_describe_group_response(std::span<const std::uint8_t> payload,
+                                            DescribeGroupResponse& response) {
+  PayloadReader reader{payload};
+  std::uint32_t offset_count = 0;
+  if (!reader.read_string(response.group) || !reader.read_string(response.topic) ||
+      !reader.read_u32(response.active_member_count) || !reader.read_u32(offset_count)) {
+    return error_result(ErrorCode::MalformedPayload, "malformed describe-group response payload");
+  }
+  response.offsets.clear();
+  response.offsets.reserve(offset_count);
+  for (std::uint32_t index = 0; index < offset_count; ++index) {
+    GroupOffsetDescription offset;
+    if (!reader.read_u16(offset.partition) || !read_bool(reader, offset.has_committed_offset) ||
+        !reader.read_u64(offset.committed_offset) || !reader.read_u64(offset.earliest_offset) ||
+        !reader.read_u64(offset.next_offset) || !reader.read_u64(offset.lag) ||
+        !read_bool(reader, offset.out_of_range)) {
+      return error_result(ErrorCode::MalformedPayload, "malformed describe-group response payload");
+    }
+    response.offsets.push_back(offset);
+  }
+  if (!reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed describe-group response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t>
+encode_reset_group_offset_request(const ResetGroupOffsetRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.group);
+  write_string(out, request.topic);
+  write_u16(out, request.partition);
+  write_string(out, request.to);
+  return out;
+}
+
+DecodeResult decode_reset_group_offset_request(std::span<const std::uint8_t> payload,
+                                               ResetGroupOffsetRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.group) || !reader.read_string(request.topic) ||
+      !reader.read_u16(request.partition) || !reader.read_string(request.to) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "malformed reset-group-offset request payload");
+  }
+  if (request.group.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "reset-group-offset group must not be empty");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "reset-group-offset topic must not be empty");
+  }
+  if (request.to.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "reset-group-offset target must not be empty");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t>
+encode_reset_group_offset_response(const ResetGroupOffsetResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.group);
+  write_string(out, response.topic);
+  write_u16(out, response.partition);
+  write_u64(out, response.next_offset);
+  write_string(out, response.status);
+  return out;
+}
+
+DecodeResult decode_reset_group_offset_response(std::span<const std::uint8_t> payload,
+                                                ResetGroupOffsetResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.group) || !reader.read_string(response.topic) ||
+      !reader.read_u16(response.partition) || !reader.read_u64(response.next_offset) ||
+      !reader.read_string(response.status) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "malformed reset-group-offset response payload");
   }
   return ok_result();
 }

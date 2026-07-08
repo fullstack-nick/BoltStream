@@ -247,6 +247,51 @@ bool GroupCoordinator::has_active_members(std::string_view group, std::string_vi
   return !state.members.empty();
 }
 
+std::size_t GroupCoordinator::active_member_count(std::string_view group, std::string_view topic,
+                                                  TimePoint now) {
+  std::lock_guard lock{mutex_};
+  const GroupKey key{std::string{group}, std::string{topic}};
+  auto state_it = groups_.find(key);
+  if (state_it == groups_.end()) {
+    return 0;
+  }
+  auto& state = state_it->second;
+  const auto expired = expire_members(state, now);
+  if (!expired.empty()) {
+    bump_generation(state);
+  }
+  return state.members.size();
+}
+
+bool GroupCoordinator::topic_has_active_members(std::string_view topic, TimePoint now) {
+  std::lock_guard lock{mutex_};
+  bool active = false;
+  for (auto& [key, state] : groups_) {
+    if (key.topic != topic) {
+      continue;
+    }
+    const auto expired = expire_members(state, now);
+    if (!expired.empty()) {
+      bump_generation(state);
+    }
+    if (!state.members.empty()) {
+      active = true;
+    }
+  }
+  return active;
+}
+
+void GroupCoordinator::remove_topic(std::string_view topic) {
+  std::lock_guard lock{mutex_};
+  for (auto it = groups_.begin(); it != groups_.end();) {
+    if (it->first.topic == topic) {
+      it = groups_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 GroupCoordinator::Result GroupCoordinator::make_result(const GroupState& state,
                                                        const MemberState* member) const {
   Result result;

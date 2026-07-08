@@ -34,6 +34,27 @@ bool parse_u32(std::string_view text, std::uint32_t& value, bool allow_zero = fa
   return true;
 }
 
+bool parse_u64(std::string_view text, std::uint64_t& value, bool allow_zero = false) {
+  std::uint64_t parsed{};
+  const auto* begin = text.data();
+  const auto* end = text.data() + text.size();
+  const auto result = std::from_chars(begin, end, parsed);
+  if (result.ec != std::errc{} || result.ptr != end || (!allow_zero && parsed == 0)) {
+    return false;
+  }
+  value = parsed;
+  return true;
+}
+
+bool parse_umax(std::string_view text, std::uintmax_t& value, bool allow_zero = false) {
+  std::uint64_t parsed{};
+  if (!parse_u64(text, parsed, allow_zero)) {
+    return false;
+  }
+  value = static_cast<std::uintmax_t>(parsed);
+  return true;
+}
+
 bool parse_endpoint(std::string_view text, Endpoint& endpoint) {
   const auto colon = text.rfind(':');
   if (colon == std::string_view::npos || colon == 0 || colon + 1 >= text.size()) {
@@ -158,6 +179,41 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
         return parsed;
       }
       parsed.options.max_long_poll_waiters = max_long_poll_waiters;
+    } else if (arg == "--segment-bytes") {
+      std::uintmax_t segment_bytes{};
+      if (!parse_umax(require_value(arg), segment_bytes)) {
+        parsed.error = "invalid --segment-bytes value";
+        return parsed;
+      }
+      parsed.options.segment_bytes = segment_bytes;
+    } else if (arg == "--segment-max-age-seconds") {
+      std::uint64_t segment_max_age_seconds{};
+      if (!parse_u64(require_value(arg), segment_max_age_seconds, true)) {
+        parsed.error = "invalid --segment-max-age-seconds value";
+        return parsed;
+      }
+      parsed.options.segment_max_age_seconds = segment_max_age_seconds;
+    } else if (arg == "--retention-max-age-seconds") {
+      std::uint64_t retention_max_age_seconds{};
+      if (!parse_u64(require_value(arg), retention_max_age_seconds, true)) {
+        parsed.error = "invalid --retention-max-age-seconds value";
+        return parsed;
+      }
+      parsed.options.retention_max_age_seconds = retention_max_age_seconds;
+    } else if (arg == "--retention-max-bytes") {
+      std::uintmax_t retention_max_bytes{};
+      if (!parse_umax(require_value(arg), retention_max_bytes, true)) {
+        parsed.error = "invalid --retention-max-bytes value";
+        return parsed;
+      }
+      parsed.options.retention_max_bytes = retention_max_bytes;
+    } else if (arg == "--retention-check-interval-ms") {
+      std::uint32_t retention_check_interval_ms{};
+      if (!parse_u32(require_value(arg), retention_check_interval_ms, true)) {
+        parsed.error = "invalid --retention-check-interval-ms value";
+        return parsed;
+      }
+      parsed.options.retention_check_interval_ms = retention_check_interval_ms;
     } else {
       parsed.error = "unknown argument: " + std::string{arg};
       return parsed;
@@ -173,7 +229,10 @@ std::string server_usage() {
          "[--max-fetch-records N] [--max-fetch-bytes BYTES] "
          "[--max-topic-partitions N] [--max-fetch-wait-ms MS] "
          "[--max-append-queue-depth N] [--append-workers N] "
-         "[--max-broker-connections N] [--max-long-poll-waiters N]\n"
+         "[--max-broker-connections N] [--max-long-poll-waiters N] "
+         "[--segment-bytes BYTES] [--segment-max-age-seconds SECONDS] "
+         "[--retention-max-age-seconds SECONDS] [--retention-max-bytes BYTES] "
+         "[--retention-check-interval-ms MS]\n"
          "\n"
          "Defaults:\n"
          "  --listen 0.0.0.0:9000\n"
@@ -187,7 +246,12 @@ std::string server_usage() {
          "  --max-append-queue-depth 32\n"
          "  --append-workers 2\n"
          "  --max-broker-connections 128\n"
-         "  --max-long-poll-waiters 128\n";
+         "  --max-long-poll-waiters 128\n"
+         "  --segment-bytes 268435456\n"
+         "  --segment-max-age-seconds 3600\n"
+         "  --retention-max-age-seconds 604800\n"
+         "  --retention-max-bytes 1073741824\n"
+         "  --retention-check-interval-ms 60000\n";
 }
 
 std::string endpoint_to_string(const Endpoint& endpoint) {

@@ -283,6 +283,190 @@ try {
 }
 Write-Host "Live coordinated group split and timeout takeover succeeded for topic $CoordinatedTopic."
 
+$Phase8OverrideScript = @"
+#!/usr/bin/env bash
+set -euo pipefail
+sudo mkdir -p /etc/systemd/system/boltstream.service.d
+sudo tee /etc/systemd/system/boltstream.service.d/phase8-smoke.conf >/dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/opt/boltstream/current/bin/boltstream-server --listen 0.0.0.0:9000 --admin-listen 127.0.0.1:9100 --data /var/lib/boltstream --segment-bytes 96 --segment-max-age-seconds 0 --retention-max-age-seconds 1 --retention-max-bytes 0 --retention-check-interval-ms 0
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart boltstream.service
+for i in {1..50}; do
+  if curl -fsS http://127.0.0.1:9100/health/ready >/dev/null; then
+    exit 0
+  fi
+  sleep 0.2
+done
+curl -fsS http://127.0.0.1:9100/health/ready >/dev/null
+"@
+$Phase8OverrideLocal = Join-Path $env:TEMP "boltstream-phase8-override.sh"
+$Phase8OverrideRemote = "/tmp/boltstream-phase8-override.sh"
+[System.IO.File]::WriteAllText($Phase8OverrideLocal, $Phase8OverrideScript.Replace("`r`n", "`n"), [System.Text.Encoding]::ASCII)
+
+$Phase8CleanupScript = @'
+#!/usr/bin/env bash
+set -euo pipefail
+sudo rm -f /etc/systemd/system/boltstream.service.d/phase8-smoke.conf
+sudo rmdir /etc/systemd/system/boltstream.service.d 2>/dev/null || true
+sudo systemctl daemon-reload
+sudo systemctl restart boltstream.service
+for i in {1..50}; do
+  if curl -fsS http://127.0.0.1:9100/health/ready >/dev/null; then
+    exit 0
+  fi
+  sleep 0.2
+done
+curl -fsS http://127.0.0.1:9100/health/ready >/dev/null
+'@
+$Phase8CleanupLocal = Join-Path $env:TEMP "boltstream-phase8-cleanup.sh"
+$Phase8CleanupRemote = "/tmp/boltstream-phase8-cleanup.sh"
+[System.IO.File]::WriteAllText($Phase8CleanupLocal, $Phase8CleanupScript.Replace("`r`n", "`n"), [System.Text.Encoding]::ASCII)
+
+try {
+  Write-Host "Applying temporary Phase 8 live retention settings."
+  & $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $Phase8OverrideLocal "${InstanceName}:$Phase8OverrideRemote"
+  if ($LASTEXITCODE -ne 0) { throw "Failed to copy Phase 8 override script to $InstanceName." }
+  & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "bash $Phase8OverrideRemote"
+  if ($LASTEXITCODE -ne 0) { throw "Failed to apply Phase 8 override on $InstanceName." }
+
+  $Phase8Topic = "live-phase8-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
+  $CreateOutput = & $Admin topics create --host $ExternalIp --port 9000 --token $BrokerToken --topic $Phase8Topic --partitions 1
+  if ($LASTEXITCODE -ne 0) {
+    throw "Live Phase 8 create-topic failed with exit code $LASTEXITCODE. Output: $($CreateOutput -join "`n")"
+  }
+  $Created = ($CreateOutput -join "`n") | ConvertFrom-Json
+  if (($Created.status -ne "created" -and $Created.status -ne "exists") -or $Created.partitions -ne 1) {
+    throw "Unexpected live Phase 8 create-topic output: $($Created | ConvertTo-Json -Compress)"
+  }
+
+  for ($i = 0; $i -lt 3; ++$i) {
+    $ProduceOutput = & $Producer --host $ExternalIp --port 9000 --token $BrokerToken --topic $Phase8Topic --key "$i" --message "message-00000000000000000000000000000000"
+    if ($LASTEXITCODE -ne 0) {
+      throw "Live Phase 8 produce failed with exit code $LASTEXITCODE. Output: $($ProduceOutput -join "`n")"
+    }
+    $Produced = ($ProduceOutput -join "`n") | ConvertFrom-Json
+    if ($Produced.offset -ne $i) {
+      throw "Expected Phase 8 offset $i, got $($Produced | ConvertTo-Json -Compress)"
+    }
+  }
+
+  $Phase8AgeScript = @"
+#!/usr/bin/env bash
+set -euo pipefail
+PART_DIR="/var/lib/boltstream/topics/$Phase8Topic/partition-000000"
+echo "phase8 before retention:"
+find "`$PART_DIR" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+mapfile -t logs < <(find "`$PART_DIR" -maxdepth 1 -name '*.log' | sort)
+if [ "`${#logs[@]}" -lt 3 ]; then
+  echo "expected at least three log segments, found `${#logs[@]}" >&2
+  exit 1
+fi
+for ((i=0; i<`${#logs[@]}-1; ++i)); do
+  sudo touch -d '10 seconds ago' "`${logs[$i]}"
+done
+"@
+  $Phase8AgeLocal = Join-Path $env:TEMP "boltstream-phase8-age.sh"
+  $Phase8AgeRemote = "/tmp/boltstream-phase8-age.sh"
+  [System.IO.File]::WriteAllText($Phase8AgeLocal, $Phase8AgeScript.Replace("`r`n", "`n"), [System.Text.Encoding]::ASCII)
+  & $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $Phase8AgeLocal "${InstanceName}:$Phase8AgeRemote"
+  if ($LASTEXITCODE -ne 0) { throw "Failed to copy Phase 8 aging script to $InstanceName." }
+  $AgeOutput = & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "bash $Phase8AgeRemote"
+  if ($LASTEXITCODE -ne 0) { throw "Failed to age Phase 8 segments on $InstanceName." }
+  $AgeOutput
+  Remove-Item -Force -LiteralPath $Phase8AgeLocal -ErrorAction SilentlyContinue
+
+  $RetentionOutput = & $Admin retention run --host $ExternalIp --port 9000 --token $BrokerToken --topic $Phase8Topic
+  if ($LASTEXITCODE -ne 0) {
+    throw "Live Phase 8 retention failed with exit code $LASTEXITCODE. Output: $($RetentionOutput -join "`n")"
+  }
+  $Retained = ($RetentionOutput -join "`n") | ConvertFrom-Json
+  if ($Retained.segments_deleted -lt 2 -or $Retained.partitions[0].earliest_offset -ne 2) {
+    throw "Unexpected live Phase 8 retention output: $($Retained | ConvertTo-Json -Compress)"
+  }
+
+  $TooOldOutput = & $Consumer --host $ExternalIp --port 9000 --token $BrokerToken --topic $Phase8Topic --from 0
+  if ($LASTEXITCODE -eq 0) {
+    throw "Live Phase 8 retained-away fetch unexpectedly succeeded. Output: $($TooOldOutput -join "`n")"
+  }
+  $TooOld = ($TooOldOutput -join "`n") | ConvertFrom-Json
+  if ($TooOld.error_code -ne "offset_out_of_range") {
+    throw "Expected live Phase 8 offset_out_of_range, got $($TooOld | ConvertTo-Json -Compress)"
+  }
+
+  $BeginningOutput = & $Consumer --host $ExternalIp --port 9000 --token $BrokerToken --topic $Phase8Topic --from beginning
+  if ($LASTEXITCODE -ne 0) {
+    throw "Live Phase 8 beginning fetch failed with exit code $LASTEXITCODE. Output: $($BeginningOutput -join "`n")"
+  }
+  $Beginning = ($BeginningOutput -join "`n") | ConvertFrom-Json
+  if ($Beginning.from -ne 2 -or $Beginning.records[0].offset -ne 2) {
+    throw "Unexpected live Phase 8 beginning fetch output: $($Beginning | ConvertTo-Json -Compress)"
+  }
+
+  $CommitOutput = & $Consumer --host $ExternalIp --port 9000 --token $BrokerToken --topic $Phase8Topic --group livephase8 --from beginning --commit
+  if ($LASTEXITCODE -ne 0) {
+    throw "Live Phase 8 commit failed with exit code $LASTEXITCODE. Output: $($CommitOutput -join "`n")"
+  }
+
+  $GroupOutput = & $Admin groups describe --host $ExternalIp --port 9000 --token $BrokerToken --group livephase8 --topic $Phase8Topic
+  if ($LASTEXITCODE -ne 0) {
+    throw "Live Phase 8 group describe failed with exit code $LASTEXITCODE. Output: $($GroupOutput -join "`n")"
+  }
+  $Group = ($GroupOutput -join "`n") | ConvertFrom-Json
+  if (-not $Group.offsets[0].has_committed_offset -or $Group.offsets[0].committed_offset -ne 3) {
+    throw "Unexpected live Phase 8 group output: $($Group | ConvertTo-Json -Compress)"
+  }
+
+  $ResetOutput = & $Admin groups reset-offset --host $ExternalIp --port 9000 --token $BrokerToken --group livephase8 --topic $Phase8Topic --partition 0 --to beginning
+  if ($LASTEXITCODE -ne 0) {
+    throw "Live Phase 8 group reset failed with exit code $LASTEXITCODE. Output: $($ResetOutput -join "`n")"
+  }
+  $Reset = ($ResetOutput -join "`n") | ConvertFrom-Json
+  if ($Reset.next_offset -ne 2) {
+    throw "Unexpected live Phase 8 reset output: $($Reset | ConvertTo-Json -Compress)"
+  }
+
+  $DeleteOutput = & $Admin topics delete --host $ExternalIp --port 9000 --token $BrokerToken --topic $Phase8Topic
+  if ($LASTEXITCODE -ne 0) {
+    throw "Live Phase 8 delete failed with exit code $LASTEXITCODE. Output: $($DeleteOutput -join "`n")"
+  }
+  $Deleted = ($DeleteOutput -join "`n") | ConvertFrom-Json
+  if ($Deleted.status -ne "deleted") {
+    throw "Unexpected live Phase 8 delete output: $($Deleted | ConvertTo-Json -Compress)"
+  }
+
+  $Phase8InspectScript = @"
+#!/usr/bin/env bash
+set -euo pipefail
+echo "phase8 after delete topic path:"
+if [ -e "/var/lib/boltstream/topics/$Phase8Topic" ]; then
+  find "/var/lib/boltstream/topics/$Phase8Topic" -maxdepth 4 -type f -print
+  exit 1
+fi
+echo "deleted"
+echo "phase8 journal:"
+journalctl -u boltstream.service -n 80 --no-pager | grep -E 'retention_applied|topic_deleted|protocol_error' || true
+"@
+  $Phase8InspectLocal = Join-Path $env:TEMP "boltstream-phase8-inspect.sh"
+  $Phase8InspectRemote = "/tmp/boltstream-phase8-inspect.sh"
+  [System.IO.File]::WriteAllText($Phase8InspectLocal, $Phase8InspectScript.Replace("`r`n", "`n"), [System.Text.Encoding]::ASCII)
+  & $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $Phase8InspectLocal "${InstanceName}:$Phase8InspectRemote"
+  if ($LASTEXITCODE -ne 0) { throw "Failed to copy Phase 8 inspect script to $InstanceName." }
+  $Phase8InspectOutput = & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "bash $Phase8InspectRemote"
+  if ($LASTEXITCODE -ne 0) { throw "Live Phase 8 remote inspection failed on $InstanceName." }
+  $Phase8InspectOutput
+  Remove-Item -Force -LiteralPath $Phase8InspectLocal -ErrorAction SilentlyContinue
+  Write-Host "Live Phase 8 retention, group reset, and topic delete succeeded for topic $Phase8Topic."
+} finally {
+  & $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $Phase8CleanupLocal "${InstanceName}:$Phase8CleanupRemote" | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "bash $Phase8CleanupRemote" | Out-Null
+  }
+  Remove-Item -Force -LiteralPath $Phase8OverrideLocal, $Phase8CleanupLocal -ErrorAction SilentlyContinue
+}
+
 $RemoteScript = "/tmp/boltstream-smoke-live.sh"
 $LocalScript = Join-Path $env:TEMP "boltstream-smoke-live.sh"
 

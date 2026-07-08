@@ -653,6 +653,13 @@ Deliverables:
 - Consumer group describe and reset-offset commands.
 - Offset-out-of-range responses when retained data no longer contains the requested offset.
 - Operational documentation for disk growth and cleanup.
+- Protocol version `4` lifecycle frames for topic list/describe/delete, retention run,
+  group describe, and group offset reset.
+- Broker options `--segment-bytes`, `--segment-max-age-seconds`,
+  `--retention-max-age-seconds`, `--retention-max-bytes`, and
+  `--retention-check-interval-ms`.
+- Default retention policy: 7 day max age, 1 GiB max bytes per partition, one hour
+  segment max age, and a 60 second retention timer.
 
 Acceptance:
 
@@ -660,6 +667,9 @@ Acceptance:
 - Topic deletion removes manifests, partition logs, and related metadata safely.
 - Admin lifecycle commands work locally and against the live GCP broker.
 - Live proof records before/after disk and file-state inspection.
+- Topic deletion and group offset reset reject active coordinated groups.
+- Fetching `beginning` starts at the retained low watermark; explicit and committed
+  offsets below it return `offset_out_of_range`.
 
 ### Phase 9: Metrics and Operations
 

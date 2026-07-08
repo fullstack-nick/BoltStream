@@ -9,7 +9,7 @@
 namespace boltstream::protocol {
 
 inline constexpr std::uint32_t kMagic = 0x42535452U;
-inline constexpr std::uint16_t kProtocolVersion = 3;
+inline constexpr std::uint16_t kProtocolVersion = 4;
 inline constexpr std::uint32_t kFrameHeaderBytes = 32;
 inline constexpr std::uint32_t kDefaultMaxFrameBytes = 1024 * 1024;
 
@@ -39,6 +39,18 @@ enum class FrameType : std::uint16_t {
   LeaveGroupResponse = 23,
   GroupOffsetCommitRequest = 24,
   GroupOffsetCommitResponse = 25,
+  ListTopicsRequest = 26,
+  ListTopicsResponse = 27,
+  DescribeTopicRequest = 28,
+  DescribeTopicResponse = 29,
+  DeleteTopicRequest = 30,
+  DeleteTopicResponse = 31,
+  RunRetentionRequest = 32,
+  RunRetentionResponse = 33,
+  DescribeGroupRequest = 34,
+  DescribeGroupResponse = 35,
+  ResetGroupOffsetRequest = 36,
+  ResetGroupOffsetResponse = 37,
 };
 
 enum class ErrorCode : std::uint32_t {
@@ -60,6 +72,8 @@ enum class ErrorCode : std::uint32_t {
   Overloaded = 16,
   RebalanceRequired = 17,
   StaleMember = 18,
+  OffsetOutOfRange = 19,
+  GroupActive = 20,
 };
 
 struct FrameHeader {
@@ -226,6 +240,105 @@ struct GroupOffsetCommitResponse {
   std::uint64_t next_offset{0};
 };
 
+struct TopicPartitionDescription {
+  std::uint16_t partition{0};
+  std::uint64_t earliest_offset{0};
+  std::uint64_t next_offset{0};
+  std::uint32_t segment_count{0};
+  std::uint64_t log_bytes{0};
+};
+
+struct TopicDescription {
+  std::string topic;
+  std::uint16_t partition_count{0};
+  std::uint64_t log_bytes{0};
+  std::vector<TopicPartitionDescription> partitions;
+};
+
+struct ListTopicsResponse {
+  std::vector<TopicDescription> topics;
+};
+
+struct DescribeTopicRequest {
+  std::string topic;
+};
+
+struct DescribeTopicResponse {
+  TopicDescription topic;
+};
+
+struct DeleteTopicRequest {
+  std::string topic;
+};
+
+struct DeleteTopicResponse {
+  std::string topic;
+  std::string status;
+  std::uint16_t partitions_deleted{0};
+  std::uint32_t segments_deleted{0};
+  std::uint64_t bytes_deleted{0};
+  std::uint32_t offsets_removed{0};
+};
+
+struct RunRetentionRequest {
+  std::string topic;
+};
+
+struct RetentionPartitionResult {
+  std::string topic;
+  std::uint16_t partition{0};
+  std::uint32_t segments_deleted{0};
+  std::uint64_t bytes_deleted{0};
+  std::uint64_t earliest_offset{0};
+  std::uint64_t next_offset{0};
+};
+
+struct RunRetentionResponse {
+  std::string topic;
+  std::uint32_t topics_scanned{0};
+  std::uint32_t partitions_scanned{0};
+  std::uint32_t segments_deleted{0};
+  std::uint64_t bytes_deleted{0};
+  std::vector<RetentionPartitionResult> partitions;
+};
+
+struct DescribeGroupRequest {
+  std::string group;
+  std::string topic;
+};
+
+struct GroupOffsetDescription {
+  std::uint16_t partition{0};
+  bool has_committed_offset{false};
+  std::uint64_t committed_offset{0};
+  std::uint64_t earliest_offset{0};
+  std::uint64_t next_offset{0};
+  std::uint64_t lag{0};
+  bool out_of_range{false};
+};
+
+struct DescribeGroupResponse {
+  std::string group;
+  std::string topic;
+  std::uint32_t active_member_count{0};
+  std::vector<GroupOffsetDescription> offsets;
+};
+
+struct ResetGroupOffsetRequest {
+  std::string group;
+  std::string topic;
+  std::uint16_t partition{0};
+  std::string to;
+};
+
+struct ResetGroupOffsetResponse {
+  std::string group;
+  std::string topic;
+  std::uint16_t partition{0};
+  std::uint64_t next_offset{0};
+  std::string status;
+};
+
 struct ProduceResponse {
   std::string topic;
   std::uint16_t partition{0};
@@ -350,6 +463,46 @@ std::vector<std::uint8_t>
 encode_group_offset_commit_response(const GroupOffsetCommitResponse& response);
 DecodeResult decode_group_offset_commit_response(std::span<const std::uint8_t> payload,
                                                  GroupOffsetCommitResponse& response);
+
+std::vector<std::uint8_t> encode_list_topics_response(const ListTopicsResponse& response);
+DecodeResult decode_list_topics_response(std::span<const std::uint8_t> payload,
+                                         ListTopicsResponse& response);
+
+std::vector<std::uint8_t> encode_describe_topic_request(const DescribeTopicRequest& request);
+DecodeResult decode_describe_topic_request(std::span<const std::uint8_t> payload,
+                                           DescribeTopicRequest& request);
+std::vector<std::uint8_t> encode_describe_topic_response(const DescribeTopicResponse& response);
+DecodeResult decode_describe_topic_response(std::span<const std::uint8_t> payload,
+                                            DescribeTopicResponse& response);
+
+std::vector<std::uint8_t> encode_delete_topic_request(const DeleteTopicRequest& request);
+DecodeResult decode_delete_topic_request(std::span<const std::uint8_t> payload,
+                                         DeleteTopicRequest& request);
+std::vector<std::uint8_t> encode_delete_topic_response(const DeleteTopicResponse& response);
+DecodeResult decode_delete_topic_response(std::span<const std::uint8_t> payload,
+                                          DeleteTopicResponse& response);
+
+std::vector<std::uint8_t> encode_run_retention_request(const RunRetentionRequest& request);
+DecodeResult decode_run_retention_request(std::span<const std::uint8_t> payload,
+                                          RunRetentionRequest& request);
+std::vector<std::uint8_t> encode_run_retention_response(const RunRetentionResponse& response);
+DecodeResult decode_run_retention_response(std::span<const std::uint8_t> payload,
+                                           RunRetentionResponse& response);
+
+std::vector<std::uint8_t> encode_describe_group_request(const DescribeGroupRequest& request);
+DecodeResult decode_describe_group_request(std::span<const std::uint8_t> payload,
+                                           DescribeGroupRequest& request);
+std::vector<std::uint8_t> encode_describe_group_response(const DescribeGroupResponse& response);
+DecodeResult decode_describe_group_response(std::span<const std::uint8_t> payload,
+                                            DescribeGroupResponse& response);
+
+std::vector<std::uint8_t> encode_reset_group_offset_request(const ResetGroupOffsetRequest& request);
+DecodeResult decode_reset_group_offset_request(std::span<const std::uint8_t> payload,
+                                               ResetGroupOffsetRequest& request);
+std::vector<std::uint8_t>
+encode_reset_group_offset_response(const ResetGroupOffsetResponse& response);
+DecodeResult decode_reset_group_offset_response(std::span<const std::uint8_t> payload,
+                                                ResetGroupOffsetResponse& response);
 
 std::vector<std::uint8_t> encode_produce_response(const ProduceResponse& response);
 DecodeResult decode_produce_response(std::span<const std::uint8_t> payload,

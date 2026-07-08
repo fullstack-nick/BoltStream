@@ -35,6 +35,7 @@ private:
   using Tcp = boost::asio::ip::tcp;
 
   void prepare_data_directory();
+  void schedule_retention();
   void accept_broker_client();
   void accept_admin_client();
   void handle_broker_client(Tcp::socket socket);
@@ -56,6 +57,7 @@ private:
   boost::asio::io_context io_;
   Tcp::acceptor broker_acceptor_;
   Tcp::acceptor admin_acceptor_;
+  boost::asio::steady_timer retention_timer_;
   std::unique_ptr<BrokerRuntime> runtime_;
 };
 

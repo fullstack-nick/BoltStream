@@ -27,6 +27,11 @@ TEST(OptionsTests, DefaultsMatchCurrentContract) {
   EXPECT_EQ(parsed.options.append_workers, 2U);
   EXPECT_EQ(parsed.options.max_broker_connections, 128U);
   EXPECT_EQ(parsed.options.max_long_poll_waiters, 128U);
+  EXPECT_EQ(parsed.options.segment_bytes, 256ULL * 1024ULL * 1024ULL);
+  EXPECT_EQ(parsed.options.segment_max_age_seconds, 3600U);
+  EXPECT_EQ(parsed.options.retention_max_age_seconds, 604800U);
+  EXPECT_EQ(parsed.options.retention_max_bytes, 1024ULL * 1024ULL * 1024ULL);
+  EXPECT_EQ(parsed.options.retention_check_interval_ms, 60000U);
 }
 
 TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
@@ -55,6 +60,16 @@ TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
       std::string_view{"16"},
       std::string_view{"--max-long-poll-waiters"},
       std::string_view{"0"},
+      std::string_view{"--segment-bytes"},
+      std::string_view{"512"},
+      std::string_view{"--segment-max-age-seconds"},
+      std::string_view{"0"},
+      std::string_view{"--retention-max-age-seconds"},
+      std::string_view{"0"},
+      std::string_view{"--retention-max-bytes"},
+      std::string_view{"4096"},
+      std::string_view{"--retention-check-interval-ms"},
+      std::string_view{"0"},
   };
 
   const auto parsed = parse_server_options(args);
@@ -74,6 +89,11 @@ TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
   EXPECT_EQ(parsed.options.append_workers, 4U);
   EXPECT_EQ(parsed.options.max_broker_connections, 16U);
   EXPECT_EQ(parsed.options.max_long_poll_waiters, 0U);
+  EXPECT_EQ(parsed.options.segment_bytes, 512U);
+  EXPECT_EQ(parsed.options.segment_max_age_seconds, 0U);
+  EXPECT_EQ(parsed.options.retention_max_age_seconds, 0U);
+  EXPECT_EQ(parsed.options.retention_max_bytes, 4096U);
+  EXPECT_EQ(parsed.options.retention_check_interval_ms, 0U);
 }
 
 TEST(OptionsTests, ParsesPortShortcut) {
@@ -111,4 +131,7 @@ TEST(OptionsTests, UsageDocumentsPhaseSixDefaults) {
   EXPECT_NE(usage.find("--append-workers 2"), std::string::npos);
   EXPECT_NE(usage.find("--max-broker-connections 128"), std::string::npos);
   EXPECT_NE(usage.find("--max-long-poll-waiters 128"), std::string::npos);
+  EXPECT_NE(usage.find("--segment-bytes 268435456"), std::string::npos);
+  EXPECT_NE(usage.find("--retention-max-age-seconds 604800"), std::string::npos);
+  EXPECT_NE(usage.find("--retention-max-bytes 1073741824"), std::string::npos);
 }

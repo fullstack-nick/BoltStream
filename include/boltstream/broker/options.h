@@ -27,6 +27,11 @@ struct ServerOptions {
   std::uint32_t append_workers{2};
   std::uint32_t max_broker_connections{128};
   std::uint32_t max_long_poll_waiters{128};
+  std::uintmax_t segment_bytes{256ULL * 1024ULL * 1024ULL};
+  std::uint64_t segment_max_age_seconds{60ULL * 60ULL};
+  std::uint64_t retention_max_age_seconds{7ULL * 24ULL * 60ULL * 60ULL};
+  std::uintmax_t retention_max_bytes{1024ULL * 1024ULL * 1024ULL};
+  std::uint32_t retention_check_interval_ms{60000};
 };
 
 struct ParsedServerOptions {

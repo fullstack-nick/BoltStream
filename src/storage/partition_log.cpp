@@ -9,6 +9,8 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -244,6 +246,20 @@ std::uintmax_t file_size_or_zero(const std::filesystem::path& path) {
   return ec ? 0 : size;
 }
 
+std::uint64_t file_age_seconds_or_zero(const std::filesystem::path& path) {
+  std::error_code ec;
+  const auto modified = std::filesystem::last_write_time(path, ec);
+  if (ec) {
+    return 0;
+  }
+  const auto now = decltype(modified)::clock::now();
+  if (modified >= now) {
+    return 0;
+  }
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::seconds>(now - modified).count());
+}
+
 void truncate_file(const std::filesystem::path& path, std::uintmax_t size) {
   std::error_code ec;
   std::filesystem::resize_file(path, size, ec);
@@ -296,7 +312,11 @@ RecordMetadata PartitionLog::append(std::span<const std::uint8_t> key,
   std::uint64_t base_offset = active_segment_base();
   auto log_path = segment_path(base_offset);
   auto current_size = file_size_or_zero(log_path);
-  if (current_size > 0 && current_size + encoded.size() > options_.max_segment_bytes) {
+  const auto age_roll_due = options_.segment_max_age_seconds > 0 && current_size > 0 &&
+                            file_age_seconds_or_zero(log_path) >= options_.segment_max_age_seconds;
+  const auto size_roll_due =
+      current_size > 0 && current_size + encoded.size() > options_.max_segment_bytes;
+  if (size_roll_due || age_roll_due) {
     base_offset = next_offset_;
     log_path = segment_path(base_offset);
     current_size = 0;
@@ -380,6 +400,111 @@ std::vector<Record> PartitionLog::read_from(std::uint64_t offset, std::size_t ma
     emitted_bytes += record_bytes + sizeof(std::uint32_t);
   }
   return records;
+}
+
+RetentionStats PartitionLog::apply_retention(const RetentionPolicy& policy) {
+  RetentionStats stats;
+  auto summaries = segment_summaries();
+
+  std::uintmax_t total_bytes = 0;
+  for (const auto& summary : summaries) {
+    total_bytes += summary.log_bytes;
+  }
+
+  std::set<std::filesystem::path> deleted_logs;
+  for (const auto& summary : summaries) {
+    if (summary.active) {
+      continue;
+    }
+
+    const auto delete_by_age = policy.max_age_seconds > 0 &&
+                               file_age_seconds_or_zero(summary.log_path) >= policy.max_age_seconds;
+    const auto delete_by_size = policy.max_bytes > 0 && total_bytes > policy.max_bytes;
+    if (!delete_by_age && !delete_by_size) {
+      continue;
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(summary.log_path, ec);
+    if (ec) {
+      throw std::runtime_error("failed to delete retained segment " + summary.log_path.string() +
+                               ": " + ec.message());
+    }
+    std::filesystem::remove(index_path(summary.base_offset), ec);
+    if (ec) {
+      throw std::runtime_error("failed to delete retained index " +
+                               index_path(summary.base_offset).string() + ": " + ec.message());
+    }
+
+    deleted_logs.insert(summary.log_path);
+    ++stats.segments_deleted;
+    stats.bytes_deleted += summary.log_bytes;
+    total_bytes = summary.log_bytes > total_bytes ? 0 : total_bytes - summary.log_bytes;
+  }
+
+  if (!deleted_logs.empty()) {
+    index_.erase(std::remove_if(
+                     index_.begin(), index_.end(),
+                     [&](const auto& entry) { return deleted_logs.contains(entry.segment_path); }),
+                 index_.end());
+  }
+
+  summaries = segment_summaries();
+  for (const auto& summary : summaries) {
+    ++stats.segments_retained;
+    stats.bytes_retained += summary.log_bytes;
+  }
+  stats.earliest_offset = earliest_offset();
+  stats.next_offset = next_offset_;
+  return stats;
+}
+
+std::uint64_t PartitionLog::earliest_offset() const {
+  if (index_.empty()) {
+    return next_offset_;
+  }
+  return index_.front().offset;
+}
+
+std::vector<SegmentSummary> PartitionLog::segment_summaries() const {
+  std::map<std::filesystem::path, SegmentSummary> by_path;
+  const auto active_base = active_segment_base();
+  for (const auto& segment : list_segments(partition_dir_)) {
+    auto& summary = by_path[segment.log_path];
+    summary.base_offset = segment.base_offset;
+    summary.first_offset = segment.base_offset;
+    summary.last_offset = segment.base_offset;
+    summary.log_bytes = file_size_or_zero(segment.log_path);
+    summary.active = segment.base_offset == active_base;
+    summary.log_path = segment.log_path;
+  }
+
+  for (const auto& entry : index_) {
+    auto& summary = by_path[entry.segment_path];
+    if (summary.log_path.empty()) {
+      std::uint64_t base_offset = 0;
+      (void)parse_base_offset(entry.segment_path, base_offset);
+      summary.base_offset = base_offset;
+      summary.first_offset = entry.offset;
+      summary.last_offset = entry.offset;
+      summary.log_bytes = file_size_or_zero(entry.segment_path);
+      summary.active = base_offset == active_base;
+      summary.log_path = entry.segment_path;
+    } else {
+      summary.first_offset = std::min(summary.first_offset, entry.offset);
+      summary.last_offset = std::max(summary.last_offset, entry.offset);
+    }
+  }
+
+  std::vector<SegmentSummary> summaries;
+  summaries.reserve(by_path.size());
+  for (auto& [_, summary] : by_path) {
+    summaries.push_back(std::move(summary));
+  }
+  std::sort(summaries.begin(), summaries.end(), [](const auto& left, const auto& right) {
+    return left.base_offset < right.base_offset;
+  });
+  return summaries;
 }
 
 void PartitionLog::recover() {

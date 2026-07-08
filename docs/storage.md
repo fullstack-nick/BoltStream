@@ -1,9 +1,10 @@
 # BoltStream Storage
 
 Storage format version `2` is a durable multi-partition, append-only log with
-manifest-backed topic metadata and consumer group offset logs.
-Phase 5 uses this storage path for broker `CreateTopicRequest`, `ProduceRequest`,
-`FetchRequest`, and `OffsetCommitRequest`.
+manifest-backed topic metadata, retention-aware low watermarks, and consumer group
+offset logs.
+Phase 8 uses this storage path for broker topic lifecycle, retention, fetch, and
+consumer group offset reset commands.
 `boltstream-logtool` remains available for direct inspection and recovery checks.
 
 ## Directory Layout
@@ -30,8 +31,10 @@ Manifestless Phase 4 topics are imported as single-partition topics during broke
 startup and receive a `manifest.json`.
 
 Segment names use the segment base offset as a zero-padded 20-digit decimal
-number. Segments roll by size. The default segment size is `256 MiB`; tests and
-operator smoke checks can set a smaller value through `--segment-bytes`.
+number. Segments roll by size and by active segment age. The default segment size
+is `256 MiB`; the default segment age is one hour. Tests and operator smoke
+checks can set smaller values through `--segment-bytes` and
+`--segment-max-age-seconds`.
 
 ## Record Format
 
@@ -90,6 +93,26 @@ topic<TAB>partition<TAB>next_offset<TAB>crc32<LF>
 Offset recovery replays the latest offset per group/topic/partition and truncates
 the first corrupt or incomplete trailing offset record.
 
+## Retention
+
+Retention deletes only inactive complete segments. The active segment is always
+preserved even when it alone exceeds the configured byte limit. A retained
+partition's low watermark is the first remaining indexed offset. Fetching
+`beginning` starts at that low watermark. Fetching or committing an explicit
+offset below it returns `offset_out_of_range`.
+
+Global broker retention options:
+
+```text
+--retention-max-age-seconds 604800
+--retention-max-bytes 1073741824
+--retention-check-interval-ms 60000
+```
+
+Set a specific age or byte option to `0` to disable only that bound. Retention
+runs at startup, after appends, on the periodic broker timer, and on explicit
+`boltstream-admin retention run`.
+
 ## Operator Commands
 
 ```powershell
@@ -101,6 +124,9 @@ the first corrupt or incomplete trailing offset record.
 
 .\build\windows-gcc-debug\boltstream-logtool.exe recover `
   --data .\data --topic trades --partition 0
+
+.\build\windows-gcc-debug\boltstream-admin.exe retention run `
+  --host 127.0.0.1 --port 9000 --topic trades
 ```
 
 For a repeatable local corruption/recovery check:

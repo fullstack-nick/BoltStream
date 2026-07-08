@@ -79,7 +79,7 @@ TEST(ProtocolTests, RejectsInvalidLength) {
 TEST(ProtocolTests, RejectsUnsupportedVersion) {
   auto bytes =
       boltstream::protocol::encode_frame(boltstream::protocol::FrameType::HealthRequest, 7, {});
-  bytes[5] = 4;
+  bytes[5] = 3;
   refresh_header_crc(bytes);
 
   const auto decoded =
@@ -175,7 +175,7 @@ TEST(ProtocolTests, OverloadedErrorIsRetryable) {
 }
 
 TEST(ProtocolTests, PhaseSevenErrorsAndFrameNamesAreStable) {
-  EXPECT_EQ(boltstream::protocol::kProtocolVersion, 3U);
+  EXPECT_EQ(boltstream::protocol::kProtocolVersion, 4U);
   EXPECT_EQ(
       boltstream::protocol::frame_type_name(boltstream::protocol::FrameType::JoinGroupRequest),
       "join_group_request");
@@ -191,6 +191,24 @@ TEST(ProtocolTests, PhaseSevenErrorsAndFrameNamesAreStable) {
       boltstream::protocol::is_retryable_error(boltstream::protocol::ErrorCode::RebalanceRequired));
   EXPECT_FALSE(
       boltstream::protocol::is_retryable_error(boltstream::protocol::ErrorCode::StaleMember));
+}
+
+TEST(ProtocolTests, PhaseEightErrorsAndFrameNamesAreStable) {
+  EXPECT_EQ(
+      boltstream::protocol::frame_type_name(boltstream::protocol::FrameType::ListTopicsRequest),
+      "list_topics_request");
+  EXPECT_EQ(boltstream::protocol::frame_type_name(
+                boltstream::protocol::FrameType::ResetGroupOffsetResponse),
+            "reset_group_offset_response");
+  EXPECT_EQ(
+      boltstream::protocol::error_code_name(boltstream::protocol::ErrorCode::OffsetOutOfRange),
+      "offset_out_of_range");
+  EXPECT_EQ(boltstream::protocol::error_code_name(boltstream::protocol::ErrorCode::GroupActive),
+            "group_active");
+  EXPECT_FALSE(
+      boltstream::protocol::is_retryable_error(boltstream::protocol::ErrorCode::OffsetOutOfRange));
+  EXPECT_FALSE(
+      boltstream::protocol::is_retryable_error(boltstream::protocol::ErrorCode::GroupActive));
 }
 
 TEST(ProtocolTests, PhaseFourPayloadsRoundTrip) {
@@ -404,6 +422,86 @@ TEST(ProtocolTests, PhaseSevenGroupPayloadsRoundTrip) {
   EXPECT_EQ(decoded_commit_response.member_id, "member-000000000001");
 }
 
+TEST(ProtocolTests, PhaseEightLifecyclePayloadsRoundTrip) {
+  boltstream::protocol::DecodeResult decoded;
+
+  boltstream::protocol::ListTopicsResponse list_response;
+  list_response.topics.push_back({"trades", 2, 128, {{0, 4, 10, 2, 64}, {1, 0, 3, 1, 64}}});
+  const auto list_payload = boltstream::protocol::encode_list_topics_response(list_response);
+  boltstream::protocol::ListTopicsResponse decoded_list;
+  decoded = boltstream::protocol::decode_list_topics_response(list_payload, decoded_list);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  ASSERT_EQ(decoded_list.topics.size(), 1U);
+  EXPECT_EQ(decoded_list.topics[0].topic, "trades");
+  EXPECT_EQ(decoded_list.topics[0].partitions[0].earliest_offset, 4U);
+
+  const boltstream::protocol::DescribeTopicRequest describe_topic_request{"trades"};
+  const auto describe_topic_payload =
+      boltstream::protocol::encode_describe_topic_request(describe_topic_request);
+  boltstream::protocol::DescribeTopicRequest decoded_describe_topic_request;
+  decoded = boltstream::protocol::decode_describe_topic_request(describe_topic_payload,
+                                                                decoded_describe_topic_request);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(decoded_describe_topic_request.topic, "trades");
+
+  const boltstream::protocol::DeleteTopicResponse delete_response{"trades", "deleted", 2,
+                                                                  3,        512,       4};
+  const auto delete_payload = boltstream::protocol::encode_delete_topic_response(delete_response);
+  boltstream::protocol::DeleteTopicResponse decoded_delete;
+  decoded = boltstream::protocol::decode_delete_topic_response(delete_payload, decoded_delete);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(decoded_delete.status, "deleted");
+  EXPECT_EQ(decoded_delete.offsets_removed, 4U);
+
+  boltstream::protocol::RunRetentionResponse retention_response;
+  retention_response.topic = "trades";
+  retention_response.topics_scanned = 1;
+  retention_response.partitions_scanned = 1;
+  retention_response.segments_deleted = 2;
+  retention_response.bytes_deleted = 256;
+  retention_response.partitions.push_back({"trades", 0, 2, 256, 8, 12});
+  const auto retention_payload =
+      boltstream::protocol::encode_run_retention_response(retention_response);
+  boltstream::protocol::RunRetentionResponse decoded_retention;
+  decoded =
+      boltstream::protocol::decode_run_retention_response(retention_payload, decoded_retention);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  ASSERT_EQ(decoded_retention.partitions.size(), 1U);
+  EXPECT_EQ(decoded_retention.partitions[0].earliest_offset, 8U);
+
+  boltstream::protocol::DescribeGroupResponse group_response;
+  group_response.group = "dashboard";
+  group_response.topic = "trades";
+  group_response.active_member_count = 0;
+  group_response.offsets.push_back({0, true, 8, 4, 12, 4, false});
+  const auto group_payload = boltstream::protocol::encode_describe_group_response(group_response);
+  boltstream::protocol::DescribeGroupResponse decoded_group;
+  decoded = boltstream::protocol::decode_describe_group_response(group_payload, decoded_group);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  ASSERT_EQ(decoded_group.offsets.size(), 1U);
+  EXPECT_TRUE(decoded_group.offsets[0].has_committed_offset);
+  EXPECT_EQ(decoded_group.offsets[0].lag, 4U);
+
+  const boltstream::protocol::ResetGroupOffsetRequest reset_request{"dashboard", "trades", 0,
+                                                                    "latest"};
+  const auto reset_payload = boltstream::protocol::encode_reset_group_offset_request(reset_request);
+  boltstream::protocol::ResetGroupOffsetRequest decoded_reset_request;
+  decoded =
+      boltstream::protocol::decode_reset_group_offset_request(reset_payload, decoded_reset_request);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(decoded_reset_request.to, "latest");
+
+  const boltstream::protocol::ResetGroupOffsetResponse reset_response{"dashboard", "trades", 0, 12,
+                                                                      "reset"};
+  const auto reset_response_payload =
+      boltstream::protocol::encode_reset_group_offset_response(reset_response);
+  boltstream::protocol::ResetGroupOffsetResponse decoded_reset_response;
+  decoded = boltstream::protocol::decode_reset_group_offset_response(reset_response_payload,
+                                                                     decoded_reset_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(decoded_reset_response.next_offset, 12U);
+}
+
 TEST(ProtocolTests, RejectsMalformedPhaseSevenGroupPayloads) {
   boltstream::protocol::JoinGroupRequest join_request;
   auto decoded = boltstream::protocol::decode_join_group_request(
@@ -427,5 +525,24 @@ TEST(ProtocolTests, RejectsMalformedPhaseSevenGroupPayloads) {
       boltstream::protocol::encode_group_offset_commit_request(
           {"dashboard", "trades", "member-000000000001", 0, 0, 1}),
       commit_request);
+  EXPECT_FALSE(decoded.ok);
+}
+
+TEST(ProtocolTests, RejectsMalformedPhaseEightLifecyclePayloads) {
+  boltstream::protocol::DescribeTopicRequest topic_request;
+  auto decoded = boltstream::protocol::decode_describe_topic_request(
+      boltstream::protocol::encode_describe_topic_request({""}), topic_request);
+  EXPECT_FALSE(decoded.ok);
+  EXPECT_EQ(decoded.error, boltstream::protocol::ErrorCode::MalformedPayload);
+
+  boltstream::protocol::DescribeGroupRequest group_request;
+  decoded = boltstream::protocol::decode_describe_group_request(
+      boltstream::protocol::encode_describe_group_request({"", "trades"}), group_request);
+  EXPECT_FALSE(decoded.ok);
+
+  boltstream::protocol::ResetGroupOffsetRequest reset_request;
+  decoded = boltstream::protocol::decode_reset_group_offset_request(
+      boltstream::protocol::encode_reset_group_offset_request({"dashboard", "trades", 0, ""}),
+      reset_request);
   EXPECT_FALSE(decoded.ok);
 }

@@ -1,9 +1,10 @@
 # BoltStream Protocol
 
 BoltStream broker/client traffic uses a custom binary TCP protocol. Protocol version
-`3` validates framed requests, preserves correlation ids, supports explicit topic
+`4` validates framed requests, preserves correlation ids, supports explicit topic
 creation, multi-partition produce/fetch, durable consumer offset commits, long-poll
-fetch, retryable overload responses, and coordinated consumer groups.
+fetch, retryable overload responses, coordinated consumer groups, retention, and
+topic lifecycle operations.
 
 ## Frame Header
 
@@ -12,12 +13,12 @@ order.
 
 ```text
 uint32 magic          0x42535452 ("BSTR")
-uint16 version        3
+uint16 version        4
 uint16 frame_type
 uint32 header_bytes   32
 uint32 payload_bytes
 uint64 correlation_id
-uint32 flags          0 in protocol version 3
+uint32 flags          0 in protocol version 4
 uint32 header_crc32   CRC32 over the first 28 header bytes
 ```
 
@@ -53,11 +54,24 @@ The broker enforces `--max-frame-bytes`, defaulting to `1048576`. The limit incl
 | 23 | `LeaveGroupResponse` |
 | 24 | `GroupOffsetCommitRequest` |
 | 25 | `GroupOffsetCommitResponse` |
+| 26 | `ListTopicsRequest` |
+| 27 | `ListTopicsResponse` |
+| 28 | `DescribeTopicRequest` |
+| 29 | `DescribeTopicResponse` |
+| 30 | `DeleteTopicRequest` |
+| 31 | `DeleteTopicResponse` |
+| 32 | `RunRetentionRequest` |
+| 33 | `RunRetentionResponse` |
+| 34 | `DescribeGroupRequest` |
+| 35 | `DescribeGroupResponse` |
+| 36 | `ResetGroupOffsetRequest` |
+| 37 | `ResetGroupOffsetResponse` |
 
 The broker accepts `HealthRequest`, `MetadataRequest`, `CreateTopicRequest`,
 `ProduceRequest`, `FetchRequest`, `OffsetCommitRequest`, coordinated group
-requests, and `AuthRequest`. Health returns `HealthResponse`. Metadata,
-create-topic, produce, fetch, commit, group coordination, and auth return success
+requests, lifecycle requests, retention requests, and `AuthRequest`. Health returns
+`HealthResponse`. Metadata, create-topic, produce, fetch, commit, group
+coordination, lifecycle, retention, and auth return success
 frames when valid.
 
 ## Payload Encoding
@@ -95,11 +109,37 @@ Payloads:
 - `LeaveGroupResponse`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`, `string status`.
 - `GroupOffsetCommitRequest`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`, `uint16 partition`, `uint64 next_offset`.
 - `GroupOffsetCommitResponse`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`, `uint16 partition`, `uint64 next_offset`.
+- `ListTopicsRequest`: empty.
+- `ListTopicsResponse`: `uint32 topic_count`, then repeated topic descriptions.
+- `DescribeTopicRequest`: `string topic`.
+- `DescribeTopicResponse`: one topic description.
+- `DeleteTopicRequest`: `string topic`.
+- `DeleteTopicResponse`: `string topic`, `string status`, `uint16 partitions_deleted`, `uint32 segments_deleted`, `uint64 bytes_deleted`, `uint32 offsets_removed`.
+- `RunRetentionRequest`: `string topic`; empty string scans all topics.
+- `RunRetentionResponse`: `string topic`, `uint32 topics_scanned`, `uint32 partitions_scanned`, `uint32 segments_deleted`, `uint64 bytes_deleted`, then repeated partition retention results.
+- `DescribeGroupRequest`: `string group`, `string topic`.
+- `DescribeGroupResponse`: `string group`, `string topic`, `uint32 active_member_count`, then repeated group offset descriptions.
+- `ResetGroupOffsetRequest`: `string group`, `string topic`, `uint16 partition`, `string to`; `to` is `beginning`, `latest`, or an unsigned offset.
+- `ResetGroupOffsetResponse`: `string group`, `string topic`, `uint16 partition`, `uint64 next_offset`, `string status`.
 - `ErrorResponse`: `uint32 error_code`, `string message`.
 
+Topic descriptions encode `string topic`, `uint16 partition_count`, `uint64 log_bytes`,
+`uint32 partition_description_count`, then repeated `uint16 partition`,
+`uint64 earliest_offset`, `uint64 next_offset`, `uint32 segment_count`, `uint64 log_bytes`.
+
+Retention partition results encode `string topic`, `uint16 partition`,
+`uint32 segments_deleted`, `uint64 bytes_deleted`, `uint64 earliest_offset`,
+`uint64 next_offset`.
+
+Group offset descriptions encode `uint16 partition`, `uint32 has_committed_offset`,
+`uint64 committed_offset`, `uint64 earliest_offset`, `uint64 next_offset`, `uint64 lag`,
+`uint32 out_of_range`.
+
 `FetchRequest.from` supports `beginning`, `latest`, `committed`, or an unsigned offset
-encoded as decimal ASCII. `committed` requires a non-empty group. Long-poll waits only
-when the resolved fetch offset equals the partition high watermark; otherwise the broker
+encoded as decimal ASCII. `beginning` resolves to the partition low watermark after
+retention. `committed` requires a non-empty group and rejects committed offsets below
+the low watermark with `offset_out_of_range`. Long-poll waits only when the resolved
+fetch offset equals the partition high watermark; otherwise the broker
 returns immediately. `FetchResponse.next_offset` is the resume offset for the next fetch:
 when a response is truncated by record or byte caps, it is one past the final returned
 record. Use metadata for the partition high watermark.
@@ -133,20 +173,25 @@ group for the same `(group, topic)` has active members.
 | 16 | `overloaded` |
 | 17 | `rebalance_required` |
 | 18 | `stale_member` |
+| 19 | `offset_out_of_range` |
+| 20 | `group_active` |
 
 Malformed or unsafe frames receive a structured `ErrorResponse` when possible and then
 the broker closes the connection. Valid but unsupported operations keep the connection
 open and return `not_implemented` with the original correlation id. If
 `BOLTSTREAM_BROKER_TOKEN` is configured, metadata, produce, and fetch require a prior
 successful `AuthRequest`; unauthorized requests return `unauthorized` and close the
-connection. Create-topic and offset commit are protected by the same auth gate. Health
-remains unauthenticated.
+connection. Create-topic, lifecycle, retention, and offset commit are protected by the
+same auth gate. Health remains unauthenticated.
 
 `overloaded` and `rebalance_required` are retryable. The broker returns
 `overloaded` when bounded append queues or long-poll waiter slots are exhausted.
 The broker returns `rebalance_required` when a known group member must rejoin after
 a generation change. `stale_member` is non-retryable for stale coordinated commits
-and unknown members. The producer, consumer, and admin CLIs include `"retryable":
+and unknown members. `offset_out_of_range` is returned when fetch, commit, or reset
+targets retained-away data. `group_active` is returned when topic deletion or group
+offset reset would conflict with active coordinated members. The producer, consumer,
+and admin CLIs include `"retryable":
 true` in retryable error JSON and exit with code `5`.
 
 ## CLI Behavior
@@ -157,6 +202,14 @@ The producer and consumer CLIs use the same C++ async client library as other cl
 .\build\windows-gcc-debug\boltstream-admin.exe topics create `
   --host 127.0.0.1 --port 9000 `
   --topic trades --partitions 3
+
+.\build\windows-gcc-debug\boltstream-admin.exe topics describe `
+  --host 127.0.0.1 --port 9000 `
+  --topic trades
+
+.\build\windows-gcc-debug\boltstream-admin.exe retention run `
+  --host 127.0.0.1 --port 9000 `
+  --topic trades
 
 .\build\windows-gcc-debug\boltstream-producer.exe `
   --host 127.0.0.1 --port 9000 `

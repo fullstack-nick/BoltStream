@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <vector>
 
 namespace boltstream::storage {
 namespace {
@@ -19,6 +20,14 @@ std::string crc_input(std::string_view topic, std::uint16_t partition, std::uint
   std::ostringstream out;
   out << topic << '\t' << partition << '\t' << next_offset;
   return out.str();
+}
+
+void write_offset_record(std::ostream& out, std::string_view topic, std::uint16_t partition,
+                         std::uint64_t next_offset) {
+  const auto input = crc_input(topic, partition, next_offset);
+  const auto crc = protocol::crc32(std::span<const std::uint8_t>{
+      reinterpret_cast<const std::uint8_t*>(input.data()), input.size()});
+  out << input << '\t' << crc << '\n';
 }
 
 template <typename UInt> bool parse_uint(std::string_view text, UInt& value) {
@@ -109,6 +118,23 @@ std::optional<std::uint64_t> OffsetStore::committed(std::string_view group, std:
   return offset_it->second;
 }
 
+std::vector<OffsetSnapshot> OffsetStore::group_offsets(std::string_view group,
+                                                       std::string_view topic) const {
+  std::vector<OffsetSnapshot> snapshots;
+  const auto group_it = offsets_.find(std::string{group});
+  if (group_it == offsets_.end()) {
+    return snapshots;
+  }
+  for (const auto& [key, next_offset] : group_it->second) {
+    const auto& [offset_topic, partition] = key;
+    if (offset_topic != topic) {
+      continue;
+    }
+    snapshots.push_back({std::string{group}, offset_topic, partition, next_offset});
+  }
+  return snapshots;
+}
+
 void OffsetStore::commit(std::string_view group, std::string_view topic, std::uint16_t partition,
                          std::uint64_t next_offset) {
   if (!is_valid_group_name(group)) {
@@ -124,21 +150,45 @@ void OffsetStore::commit(std::string_view group, std::string_view topic, std::ui
     throw std::runtime_error("failed to create consumer offset directory: " + ec.message());
   }
 
-  const auto input = crc_input(topic, partition, next_offset);
-  const auto crc = protocol::crc32(std::span<const std::uint8_t>{
-      reinterpret_cast<const std::uint8_t*>(input.data()), input.size()});
-
   std::ofstream out{offsets_path(group), std::ios::binary | std::ios::app};
   if (!out) {
     throw std::runtime_error("failed to open consumer offset log");
   }
-  out << input << '\t' << crc << '\n';
+  write_offset_record(out, topic, partition, next_offset);
   out.flush();
   if (!out) {
     throw std::runtime_error("failed to append consumer offset log");
   }
 
   offsets_[std::string{group}][{std::string{topic}, partition}] = next_offset;
+}
+
+OffsetCleanupStats OffsetStore::remove_topic(std::string_view topic) {
+  OffsetCleanupStats stats;
+  std::vector<std::string> touched_groups;
+  for (auto& [group, offsets] : offsets_) {
+    const auto before = offsets.size();
+    for (auto it = offsets.begin(); it != offsets.end();) {
+      const auto& [offset_topic, partition] = it->first;
+      (void)partition;
+      if (offset_topic == topic) {
+        it = offsets.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    const auto removed = before - offsets.size();
+    if (removed > 0) {
+      stats.offsets_removed += removed;
+      ++stats.groups_touched;
+      touched_groups.push_back(group);
+    }
+  }
+
+  for (const auto& group : touched_groups) {
+    rewrite_group(group);
+  }
+  return stats;
 }
 
 void OffsetStore::recover() {
@@ -205,6 +255,53 @@ void OffsetStore::recover_group(std::string_view group, const std::filesystem::p
   if (valid_end < content.size()) {
     stats_.bytes_truncated += static_cast<std::uintmax_t>(content.size()) - valid_end;
     truncate_file(path, valid_end);
+  }
+}
+
+void OffsetStore::rewrite_group(std::string_view group) {
+  const auto group_it = offsets_.find(std::string{group});
+  if (group_it == offsets_.end() || group_it->second.empty()) {
+    std::error_code ec;
+    std::filesystem::remove_all(group_dir(group), ec);
+    if (ec) {
+      throw std::runtime_error("failed to remove empty consumer offset directory: " + ec.message());
+    }
+    if (group_it != offsets_.end()) {
+      offsets_.erase(group_it);
+    }
+    return;
+  }
+
+  std::error_code ec;
+  std::filesystem::create_directories(group_dir(group), ec);
+  if (ec) {
+    throw std::runtime_error("failed to create consumer offset directory: " + ec.message());
+  }
+
+  const auto path = offsets_path(group);
+  const auto tmp_path = path.string() + ".tmp";
+  {
+    std::ofstream out{tmp_path, std::ios::binary | std::ios::trunc};
+    if (!out) {
+      throw std::runtime_error("failed to rewrite consumer offset log: " + tmp_path);
+    }
+    for (const auto& [key, next_offset] : group_it->second) {
+      const auto& [topic, partition] = key;
+      write_offset_record(out, topic, partition, next_offset);
+    }
+    out.flush();
+    if (!out) {
+      throw std::runtime_error("failed to flush rewritten consumer offset log: " + tmp_path);
+    }
+  }
+
+  std::filesystem::remove(path, ec);
+  if (ec) {
+    throw std::runtime_error("failed to replace consumer offset log: " + ec.message());
+  }
+  std::filesystem::rename(tmp_path, path, ec);
+  if (ec) {
+    throw std::runtime_error("failed to install rewritten consumer offset log: " + ec.message());
   }
 }
 
