@@ -1,8 +1,9 @@
 # BoltStream Protocol
 
 BoltStream broker/client traffic uses a custom binary TCP protocol. Protocol version
-`1` validates framed requests, preserves correlation ids, and supports broker-backed
-produce/fetch against the durable single-partition log.
+`2` validates framed requests, preserves correlation ids, and supports explicit topic
+creation, multi-partition produce/fetch, durable consumer offset commits, and long-poll
+fetch.
 
 ## Frame Header
 
@@ -11,12 +12,12 @@ order.
 
 ```text
 uint32 magic          0x42535452 ("BSTR")
-uint16 version        1
+uint16 version        2
 uint16 frame_type
 uint32 header_bytes   32
 uint32 payload_bytes
 uint64 correlation_id
-uint32 flags          0 in protocol version 1
+uint32 flags          0 in protocol version 2
 uint32 header_crc32   CRC32 over the first 28 header bytes
 ```
 
@@ -40,11 +41,13 @@ The broker enforces `--max-frame-bytes`, defaulting to `1048576`. The limit incl
 | 11 | `OffsetCommitResponse` |
 | 12 | `AuthRequest` |
 | 13 | `AuthResponse` |
+| 14 | `CreateTopicRequest` |
+| 15 | `CreateTopicResponse` |
 
-The broker accepts `HealthRequest`, `MetadataRequest`, `ProduceRequest`, `FetchRequest`,
-`OffsetCommitRequest`, and `AuthRequest`. Health returns `HealthResponse`. Metadata,
-produce, fetch, and auth return success frames when valid. Offset commits remain
-`not_implemented` until consumer groups land.
+The broker accepts `HealthRequest`, `MetadataRequest`, `CreateTopicRequest`,
+`ProduceRequest`, `FetchRequest`, `OffsetCommitRequest`, and `AuthRequest`. Health
+returns `HealthResponse`. Metadata, create-topic, produce, fetch, commit, and auth
+return success frames when valid.
 
 ## Payload Encoding
 
@@ -61,14 +64,22 @@ Payloads:
 - `HealthResponse`: `string status`, `string detail`.
 - `MetadataRequest`: empty.
 - `MetadataResponse`: `uint32 topic_count`, then repeated `string topic`, `uint16 partition`, `uint64 next_offset`.
+- `CreateTopicRequest`: `string topic`, `uint16 partition_count`.
+- `CreateTopicResponse`: `string topic`, `uint16 partition_count`, `string status`.
 - `ProduceRequest`: `string topic`, `bytes key`, `bytes message`.
 - `ProduceResponse`: `string topic`, `uint16 partition`, `uint64 offset`, `uint64 next_offset`, `uint32 encoded_bytes`.
-- `FetchRequest`: `string topic`, `string from`.
+- `FetchRequest`: `string topic`, `uint16 partition`, `string from`, `string group`, `uint32 max_wait_ms`.
 - `FetchResponse`: `string topic`, `uint16 partition`, `uint64 from_offset`, `uint64 next_offset`, `uint32 record_count`, then repeated `uint64 offset`, `uint64 timestamp_unix_ns`, `bytes key`, `bytes message`, `uint32 encoded_bytes`.
 - `AuthRequest`: `string token`.
 - `AuthResponse`: `string status`.
-- `OffsetCommitRequest`: empty.
+- `OffsetCommitRequest`: `string group`, `string topic`, `uint16 partition`, `uint64 next_offset`.
+- `OffsetCommitResponse`: `string group`, `string topic`, `uint16 partition`, `uint64 next_offset`.
 - `ErrorResponse`: `uint32 error_code`, `string message`.
+
+`FetchRequest.from` supports `beginning`, `latest`, `committed`, or an unsigned offset
+encoded as decimal ASCII. `committed` requires a non-empty group. Long-poll waits only
+when the resolved fetch offset equals the partition `next_offset`; otherwise the broker
+returns immediately.
 
 ## Error Codes
 
@@ -84,26 +95,40 @@ Payloads:
 | 8 | `internal_error` |
 | 9 | `reserved_flags` |
 | 10 | `unauthorized` |
+| 11 | `unknown_topic` |
+| 12 | `topic_conflict` |
+| 13 | `invalid_partition` |
+| 14 | `invalid_group` |
+| 15 | `invalid_offset` |
 
 Malformed or unsafe frames receive a structured `ErrorResponse` when possible and then
 the broker closes the connection. Valid but unsupported operations keep the connection
 open and return `not_implemented` with the original correlation id. If
 `BOLTSTREAM_BROKER_TOKEN` is configured, metadata, produce, and fetch require a prior
 successful `AuthRequest`; unauthorized requests return `unauthorized` and close the
-connection. Health remains unauthenticated.
+connection. Create-topic and offset commit are protected by the same auth gate. Health
+remains unauthenticated.
 
 ## CLI Behavior
 
 The producer and consumer CLIs use the same C++ async client library as other clients:
 
 ```powershell
+.\build\windows-gcc-debug\boltstream-admin.exe topics create `
+  --host 127.0.0.1 --port 9000 `
+  --topic trades --partitions 3
+
 .\build\windows-gcc-debug\boltstream-producer.exe `
   --host 127.0.0.1 --port 9000 `
   --topic trades --key AAPL --message "AAPL,100,192.41"
 
 .\build\windows-gcc-debug\boltstream-consumer.exe `
   --host 127.0.0.1 --port 9000 `
-  --topic trades --from beginning
+  --topic trades --partition 0 --from beginning
+
+.\build\windows-gcc-debug\boltstream-consumer.exe `
+  --host 127.0.0.1 --port 9000 `
+  --topic trades --partition 0 --group dashboard --commit
 ```
 
 Both commands return exit code `0` on success and print one structured JSON line. The

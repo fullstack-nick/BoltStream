@@ -191,7 +191,51 @@ boltstream::protocol::Frame fetch(std::uint16_t port, std::string_view topic, st
       port,
       [&](boltstream::client::AsyncClient& client,
           std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
-        client.async_fetch(topic, from, std::move(done));
+        client.async_fetch(topic, 0, from, "", 0, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame fetch_partition(std::uint16_t port, std::string_view topic,
+                                            std::uint16_t partition, std::string_view from,
+                                            std::string_view group, std::uint32_t wait_ms,
+                                            boost::system::error_code& seen_error,
+                                            bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_fetch(topic, partition, from, group, wait_ms, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame create_topic(std::uint16_t port, std::string_view topic,
+                                         std::uint16_t partitions,
+                                         boost::system::error_code& seen_error, bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_create_topic(topic, partitions, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame commit_offset(std::uint16_t port, std::string_view group,
+                                          std::string_view topic, std::uint16_t partition,
+                                          std::uint64_t next_offset,
+                                          boost::system::error_code& seen_error, bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        boltstream::protocol::OffsetCommitRequest request;
+        request.group = std::string{group};
+        request.topic = std::string{topic};
+        request.partition = partition;
+        request.next_offset = next_offset;
+        client.async_offset_commit(request, std::move(done));
       },
       seen_error, timed_out);
 }
@@ -235,6 +279,11 @@ TEST(ClientBrokerTests, ProduceFetchAndMetadataRoundTrip) {
   const auto running = start_server();
   boost::system::error_code seen_error;
   bool timed_out = false;
+
+  auto created = create_topic(running->port, "trades", 1, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
 
   auto produced =
       produce(running->port, "trades", "AAPL", "AAPL,100,192.41", seen_error, timed_out);
@@ -292,6 +341,11 @@ TEST(ClientBrokerTests, ProduceSurvivesBrokerRestart) {
 
   {
     const auto running = start_server(data_dir);
+    auto created = create_topic(running->port, "trades", 1, seen_error, timed_out);
+    ASSERT_FALSE(timed_out);
+    ASSERT_FALSE(seen_error) << seen_error.message();
+    ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
     auto produced =
         produce(running->port, "trades", "MSFT", "MSFT,200,401.50", seen_error, timed_out);
     ASSERT_FALSE(timed_out);
@@ -315,6 +369,133 @@ TEST(ClientBrokerTests, ProduceSurvivesBrokerRestart) {
 
   std::error_code ignored;
   std::filesystem::remove_all(data_dir, ignored);
+}
+
+TEST(ClientBrokerTests, MultiPartitionTopicRoutesRecordsAndReportsMetadata) {
+  const auto running = start_server();
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "multi", 3, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
+  std::vector<std::uint16_t> round_robin_partitions;
+  for (int index = 0; index < 3; ++index) {
+    auto frame = produce(running->port, "multi", "", "value-" + std::to_string(index), seen_error,
+                         timed_out);
+    ASSERT_FALSE(timed_out);
+    ASSERT_FALSE(seen_error) << seen_error.message();
+    ASSERT_EQ(frame.header.frame_type, boltstream::protocol::FrameType::ProduceResponse);
+    boltstream::protocol::ProduceResponse response;
+    const auto decoded = boltstream::protocol::decode_produce_response(frame.payload, response);
+    ASSERT_TRUE(decoded.ok) << decoded.message;
+    round_robin_partitions.push_back(response.partition);
+    EXPECT_EQ(response.offset, 0U);
+  }
+  EXPECT_EQ(round_robin_partitions, (std::vector<std::uint16_t>{0, 1, 2}));
+
+  auto keyed_one = produce(running->port, "multi", "same-key", "keyed-1", seen_error, timed_out);
+  auto keyed_two = produce(running->port, "multi", "same-key", "keyed-2", seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::ProduceResponse keyed_response_one;
+  boltstream::protocol::ProduceResponse keyed_response_two;
+  auto decoded =
+      boltstream::protocol::decode_produce_response(keyed_one.payload, keyed_response_one);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  decoded = boltstream::protocol::decode_produce_response(keyed_two.payload, keyed_response_two);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(keyed_response_one.partition, keyed_response_two.partition);
+
+  auto meta = metadata(running->port, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::MetadataResponse metadata_response;
+  decoded = boltstream::protocol::decode_metadata_response(meta.payload, metadata_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  ASSERT_EQ(metadata_response.topics.size(), 3U);
+  std::vector<std::uint16_t> metadata_partitions;
+  for (const auto& topic : metadata_response.topics) {
+    EXPECT_EQ(topic.topic, "multi");
+    metadata_partitions.push_back(topic.partition);
+  }
+  EXPECT_EQ(metadata_partitions, (std::vector<std::uint16_t>{0, 1, 2}));
+}
+
+TEST(ClientBrokerTests, ConsumerGroupCommitSurvivesRestartAndResumes) {
+  const auto data_dir = temp_path("boltstream-phase5-offsets");
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  {
+    const auto running = start_server(data_dir);
+    auto created = create_topic(running->port, "trades", 1, seen_error, timed_out);
+    ASSERT_FALSE(timed_out);
+    ASSERT_FALSE(seen_error) << seen_error.message();
+    ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
+    auto produced = produce(running->port, "trades", "AAPL", "one", seen_error, timed_out);
+    ASSERT_FALSE(timed_out);
+    ASSERT_FALSE(seen_error) << seen_error.message();
+    ASSERT_EQ(produced.header.frame_type, boltstream::protocol::FrameType::ProduceResponse);
+
+    auto committed =
+        commit_offset(running->port, "dashboard", "trades", 0, 1, seen_error, timed_out);
+    ASSERT_FALSE(timed_out);
+    ASSERT_FALSE(seen_error) << seen_error.message();
+    ASSERT_EQ(committed.header.frame_type, boltstream::protocol::FrameType::OffsetCommitResponse);
+  }
+
+  {
+    const auto running = start_server(data_dir);
+    auto fetched = fetch_partition(running->port, "trades", 0, "committed", "dashboard", 0,
+                                   seen_error, timed_out);
+    ASSERT_FALSE(timed_out);
+    ASSERT_FALSE(seen_error) << seen_error.message();
+    ASSERT_EQ(fetched.header.frame_type, boltstream::protocol::FrameType::FetchResponse);
+    boltstream::protocol::FetchResponse response;
+    const auto decoded = boltstream::protocol::decode_fetch_response(fetched.payload, response);
+    ASSERT_TRUE(decoded.ok) << decoded.message;
+    EXPECT_EQ(response.from_offset, 1U);
+    EXPECT_TRUE(response.records.empty());
+    EXPECT_EQ(response.next_offset, 1U);
+  }
+
+  std::error_code ignored;
+  std::filesystem::remove_all(data_dir, ignored);
+}
+
+TEST(ClientBrokerTests, LongPollFetchCompletesAfterDelayedProduce) {
+  const auto running = start_server();
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "waits", 1, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
+  std::thread delayed_producer([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    boost::system::error_code produce_error;
+    bool produce_timed_out = false;
+    (void)produce(running->port, "waits", "AAPL", "after-wait", produce_error, produce_timed_out);
+  });
+
+  auto fetched =
+      fetch_partition(running->port, "waits", 0, "latest", "", 2000, seen_error, timed_out);
+  delayed_producer.join();
+
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(fetched.header.frame_type, boltstream::protocol::FrameType::FetchResponse);
+  boltstream::protocol::FetchResponse response;
+  const auto decoded = boltstream::protocol::decode_fetch_response(fetched.payload, response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  ASSERT_EQ(response.records.size(), 1U);
+  EXPECT_EQ(text(response.records[0].message), "after-wait");
 }
 
 TEST(ClientBrokerTests, InvalidTopicIsRejected) {
@@ -388,7 +569,21 @@ TEST(ClientBrokerTests, ConfiguredAuthIsRequiredAndAccepted) {
         finish(make_error_code(boost::asio::error::invalid_argument), std::move(auth_frame));
         return;
       }
-      client->async_produce("trades", key, value, finish);
+      client->async_create_topic("trades", 1,
+                                 [&, client](const boost::system::error_code& create_ec,
+                                             boltstream::protocol::Frame create_frame) {
+                                   if (create_ec) {
+                                     finish(create_ec, {});
+                                     return;
+                                   }
+                                   if (create_frame.header.frame_type !=
+                                       boltstream::protocol::FrameType::CreateTopicResponse) {
+                                     finish(make_error_code(boost::asio::error::invalid_argument),
+                                            std::move(create_frame));
+                                     return;
+                                   }
+                                   client->async_produce("trades", key, value, finish);
+                                 });
     });
   });
   io.run();
@@ -400,6 +595,13 @@ TEST(ClientBrokerTests, ConfiguredAuthIsRequiredAndAccepted) {
 
 TEST(ClientBrokerTests, ConcurrentProducersAssignUniqueOffsets) {
   const auto running = start_server();
+  boost::system::error_code setup_error;
+  bool setup_timed_out = false;
+  auto created = create_topic(running->port, "trades", 1, setup_error, setup_timed_out);
+  ASSERT_FALSE(setup_timed_out);
+  ASSERT_FALSE(setup_error) << setup_error.message();
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
   boost::asio::io_context io;
   boost::asio::steady_timer timer{io};
   constexpr int kProducerCount = 8;
@@ -432,7 +634,7 @@ TEST(ClientBrokerTests, ConcurrentProducersAssignUniqueOffsets) {
                                 io.stop();
                                 return;
                               }
-                              consumer->async_fetch("trades", "beginning",
+                              consumer->async_fetch("trades", 0, "beginning", "", 0,
                                                     [&](const boost::system::error_code& request_ec,
                                                         boltstream::protocol::Frame frame) {
                                                       seen_error = request_ec;
@@ -508,6 +710,13 @@ TEST(ClientBrokerTests, ConcurrentProducersAssignUniqueOffsets) {
 
 TEST(ClientBrokerTests, MultipleConcurrentRequestsPreserveCorrelationIds) {
   const auto running = start_server();
+  boost::system::error_code setup_error;
+  bool setup_timed_out = false;
+  auto created = create_topic(running->port, "trades", 1, setup_error, setup_timed_out);
+  ASSERT_FALSE(setup_timed_out);
+  ASSERT_FALSE(setup_error) << setup_error.message();
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
   boost::asio::io_context io;
   boltstream::client::AsyncClient client{io};
   boost::asio::steady_timer timer{io};
@@ -538,7 +747,7 @@ TEST(ClientBrokerTests, MultipleConcurrentRequestsPreserveCorrelationIds) {
 
     client.async_health(complete);
     client.async_metadata(complete);
-    client.async_fetch("trades", "latest", complete);
+    client.async_fetch("trades", 0, "latest", "", 0, complete);
   });
   io.run();
 

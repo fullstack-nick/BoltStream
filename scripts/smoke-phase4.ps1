@@ -90,6 +90,7 @@ function Stop-BoltStreamServer {
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $BuildDir = Join-Path $RepoRoot "build\$Preset"
 $Server = Get-ToolPath -BuildDir $BuildDir -Name "boltstream-server"
+$Admin = Get-ToolPath -BuildDir $BuildDir -Name "boltstream-admin"
 $Producer = Get-ToolPath -BuildDir $BuildDir -Name "boltstream-producer"
 $Consumer = Get-ToolPath -BuildDir $BuildDir -Name "boltstream-consumer"
 
@@ -114,6 +115,15 @@ try {
     -DataDir $DataDir `
     -Stdout $Stdout `
     -Stderr $Stderr
+
+  $createOutput = & $Admin topics create --host 127.0.0.1 --port $BrokerPort --topic trades --partitions 1
+  if ($LASTEXITCODE -ne 0) {
+    throw "admin create-topic exited with $LASTEXITCODE. Output: $($createOutput -join "`n")"
+  }
+  $created = ($createOutput -join "`n") | ConvertFrom-Json
+  if (($created.status -ne "created" -and $created.status -ne "exists") -or $created.partitions -ne 1) {
+    throw "unexpected create-topic output: $($created | ConvertTo-Json -Compress)"
+  }
 
   $produceOutput = & $Producer --host 127.0.0.1 --port $BrokerPort --topic trades --key AAPL --message "AAPL,100,192.41"
   if ($LASTEXITCODE -ne 0) {

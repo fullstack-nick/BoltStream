@@ -9,7 +9,7 @@
 namespace boltstream::protocol {
 
 inline constexpr std::uint32_t kMagic = 0x42535452U;
-inline constexpr std::uint16_t kProtocolVersion = 1;
+inline constexpr std::uint16_t kProtocolVersion = 2;
 inline constexpr std::uint32_t kFrameHeaderBytes = 32;
 inline constexpr std::uint32_t kDefaultMaxFrameBytes = 1024 * 1024;
 
@@ -27,6 +27,8 @@ enum class FrameType : std::uint16_t {
   OffsetCommitResponse = 11,
   AuthRequest = 12,
   AuthResponse = 13,
+  CreateTopicRequest = 14,
+  CreateTopicResponse = 15,
 };
 
 enum class ErrorCode : std::uint32_t {
@@ -40,6 +42,11 @@ enum class ErrorCode : std::uint32_t {
   InternalError = 8,
   ReservedFlags = 9,
   Unauthorized = 10,
+  UnknownTopic = 11,
+  TopicConflict = 12,
+  InvalidPartition = 13,
+  InvalidGroup = 14,
+  InvalidOffset = 15,
 };
 
 struct FrameHeader {
@@ -90,6 +97,17 @@ struct AuthResponse {
   std::string status;
 };
 
+struct CreateTopicRequest {
+  std::string topic;
+  std::uint16_t partition_count{0};
+};
+
+struct CreateTopicResponse {
+  std::string topic;
+  std::uint16_t partition_count{0};
+  std::string status;
+};
+
 struct ProduceRequest {
   std::string topic;
   std::vector<std::uint8_t> key;
@@ -98,7 +116,24 @@ struct ProduceRequest {
 
 struct FetchRequest {
   std::string topic;
+  std::uint16_t partition{0};
   std::string from;
+  std::string group;
+  std::uint32_t max_wait_ms{0};
+};
+
+struct OffsetCommitRequest {
+  std::string group;
+  std::string topic;
+  std::uint16_t partition{0};
+  std::uint64_t next_offset{0};
+};
+
+struct OffsetCommitResponse {
+  std::string group;
+  std::string topic;
+  std::uint16_t partition{0};
+  std::uint64_t next_offset{0};
 };
 
 struct ProduceResponse {
@@ -161,15 +196,32 @@ DecodeResult decode_auth_request(std::span<const std::uint8_t> payload, AuthRequ
 std::vector<std::uint8_t> encode_auth_response(std::string_view status);
 DecodeResult decode_auth_response(std::span<const std::uint8_t> payload, AuthResponse& response);
 
+std::vector<std::uint8_t> encode_create_topic_request(std::string_view topic,
+                                                      std::uint16_t partition_count);
+DecodeResult decode_create_topic_request(std::span<const std::uint8_t> payload,
+                                         CreateTopicRequest& request);
+std::vector<std::uint8_t> encode_create_topic_response(const CreateTopicResponse& response);
+DecodeResult decode_create_topic_response(std::span<const std::uint8_t> payload,
+                                          CreateTopicResponse& response);
+
 std::vector<std::uint8_t> encode_produce_request(std::string_view topic,
                                                  std::span<const std::uint8_t> key,
                                                  std::span<const std::uint8_t> message);
 DecodeResult decode_produce_request(std::span<const std::uint8_t> payload, ProduceRequest& request);
 DecodeResult validate_produce_request(std::span<const std::uint8_t> payload);
 
-std::vector<std::uint8_t> encode_fetch_request(std::string_view topic, std::string_view from);
+std::vector<std::uint8_t> encode_fetch_request(std::string_view topic, std::uint16_t partition,
+                                               std::string_view from, std::string_view group,
+                                               std::uint32_t max_wait_ms);
 DecodeResult decode_fetch_request(std::span<const std::uint8_t> payload, FetchRequest& request);
 DecodeResult validate_fetch_request(std::span<const std::uint8_t> payload);
+
+std::vector<std::uint8_t> encode_offset_commit_request(const OffsetCommitRequest& request);
+DecodeResult decode_offset_commit_request(std::span<const std::uint8_t> payload,
+                                          OffsetCommitRequest& request);
+std::vector<std::uint8_t> encode_offset_commit_response(const OffsetCommitResponse& response);
+DecodeResult decode_offset_commit_response(std::span<const std::uint8_t> payload,
+                                           OffsetCommitResponse& response);
 
 std::vector<std::uint8_t> encode_produce_response(const ProduceResponse& response);
 DecodeResult decode_produce_response(std::span<const std::uint8_t> payload,

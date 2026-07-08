@@ -2,19 +2,23 @@
 
 BoltStream is a C++20 low-latency event streaming engine: a Kafka-inspired broker built from scratch to demonstrate Linux networking, durable storage, concurrency, testing, performance measurement, and cloud-native deployment.
 
-Phase 4 adds real broker-backed produce and fetch over the binary TCP protocol,
-using the single-partition append-only log from Phase 3 for durable records.
+Phase 5 adds explicit topic creation, manifest-backed multi-partition topics,
+broker-side partition routing, durable consumer group offset commits, committed
+resume, and long-poll fetch over the binary TCP protocol.
 
-## Current Phase 4 Surface
+## Current Phase 5 Surface
 
 - `boltstream-server` opens broker TCP port `9000`.
 - Admin HTTP listens on `127.0.0.1:9100`.
 - `GET /health/live` reports process liveness.
 - `GET /health/ready` reports data-directory readiness.
-- `GET /version` reports service name, Git SHA, build type, compiler, protocol version `1`, storage format version `1`, and startup time.
+- `GET /version` reports service name, Git SHA, build type, compiler, protocol version `2`, storage format version `2`, and startup time.
 - Broker TCP port `9000` accepts versioned binary frames with correlation ids and structured error responses.
-- `boltstream-producer` appends durable records to `data/topics/<topic>/partition-000000` through the broker and prints assigned offsets.
-- `boltstream-consumer` fetches durable records from `beginning`, `latest`, or an explicit offset through the broker.
+- `boltstream-admin topics create` creates topics with an immutable partition count before produce.
+- `boltstream-producer` appends durable records through the broker and prints assigned topic, partition, offset, and next offset.
+- `boltstream-consumer` fetches durable records from `beginning`, `latest`, `committed`, or an explicit offset for a chosen partition.
+- `boltstream-consumer --group GROUP --commit` commits the returned partition `next_offset` to a durable group offset log.
+- Long-poll fetch is available with `boltstream-consumer --wait-ms MS`.
 - `boltstream-logtool` remains available for direct append, read, and recovery inspection of durable records.
 - `BOLTSTREAM_BROKER_TOKEN` enables broker-protocol auth; local development may omit it, while GCP deploys require it.
 - `boltstream-bench` remains a stable benchmark shell until the benchmark phase.
@@ -49,18 +53,21 @@ docker compose up --build
 curl.exe -fsS http://127.0.0.1:9100/health/live
 curl.exe -fsS http://127.0.0.1:9100/health/ready
 curl.exe -fsS http://127.0.0.1:9100/version
+.\build\windows-gcc-debug\boltstream-admin.exe topics create --topic trades --partitions 3
 .\build\windows-gcc-debug\boltstream-producer.exe --topic trades --key AAPL --message "AAPL,100,192.41"
-.\build\windows-gcc-debug\boltstream-consumer.exe --topic trades --from beginning
+.\build\windows-gcc-debug\boltstream-consumer.exe --topic trades --partition 0 --from beginning
+.\build\windows-gcc-debug\boltstream-consumer.exe --topic trades --partition 0 --group dashboard --commit
 .\build\windows-gcc-debug\boltstream-logtool.exe append --data .\data --topic trades --key AAPL --message "AAPL,100,192.41"
 .\build\windows-gcc-debug\boltstream-logtool.exe read --data .\data --topic trades --from 0 --max-records 10
 ```
 
 Use `curl.exe` in PowerShell. Plain `curl` is a PowerShell alias.
-Producer output includes `offset`, `next_offset`, and encoded byte size. Consumer output includes returned records and `next_offset`.
+Producer output includes `partition`, `offset`, `next_offset`, and encoded byte size. Consumer output includes returned records, `next_offset`, and `committed_offset` when `--commit` is used.
 
 For a repeatable local smoke:
 
 ```powershell
+.\scripts\smoke-phase5.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
 ```

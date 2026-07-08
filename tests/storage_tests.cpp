@@ -1,3 +1,4 @@
+#include "boltstream/storage/offset_store.h"
 #include "boltstream/storage/partition_log.h"
 
 #include <gtest/gtest.h>
@@ -214,4 +215,57 @@ TEST(StorageTests, RejectsInvalidTopicNames) {
                  std::invalid_argument)
         << topic;
   }
+}
+
+TEST(StorageTests, OpensAndPersistsNonZeroPartition) {
+  TempDir temp;
+  auto log = boltstream::storage::PartitionLog::open(
+      {temp.path, "trades", 2, boltstream::storage::kDefaultMaxSegmentBytes});
+
+  append_record(log, "AAPL", "100");
+
+  EXPECT_EQ(log.next_offset(), 1U);
+  const auto records = log.read_from(0, 10, 0);
+  ASSERT_EQ(records.size(), 1U);
+  EXPECT_EQ(records[0].metadata.partition, 2U);
+  EXPECT_TRUE(
+      std::filesystem::exists(boltstream::storage::partition_directory(temp.path, "trades", 2)));
+}
+
+TEST(StorageTests, OffsetStoreReplaysCommittedOffsets) {
+  TempDir temp;
+  {
+    auto store = boltstream::storage::OffsetStore::open(temp.path);
+    store.commit("dashboard", "trades", 2, 11);
+  }
+
+  auto recovered = boltstream::storage::OffsetStore::open(temp.path);
+
+  const auto offset = recovered.committed("dashboard", "trades", 2);
+  ASSERT_TRUE(offset.has_value());
+  EXPECT_EQ(*offset, 11U);
+  EXPECT_EQ(recovered.recovery_stats().commits_recovered, 1U);
+}
+
+TEST(StorageTests, OffsetStoreTruncatesCorruptTrailingBytes) {
+  TempDir temp;
+  {
+    auto store = boltstream::storage::OffsetStore::open(temp.path);
+    store.commit("dashboard", "trades", 0, 7);
+  }
+
+  const auto log_path = temp.path / "consumer_offsets" / "dashboard" / "offsets.log";
+  const auto valid_size = std::filesystem::file_size(log_path);
+  {
+    std::ofstream out{log_path, std::ios::binary | std::ios::app};
+    out << "corrupt-trailing-record";
+  }
+
+  auto recovered = boltstream::storage::OffsetStore::open(temp.path);
+
+  const auto offset = recovered.committed("dashboard", "trades", 0);
+  ASSERT_TRUE(offset.has_value());
+  EXPECT_EQ(*offset, 7U);
+  EXPECT_EQ(std::filesystem::file_size(log_path), valid_size);
+  EXPECT_GT(recovered.recovery_stats().bytes_truncated, 0U);
 }

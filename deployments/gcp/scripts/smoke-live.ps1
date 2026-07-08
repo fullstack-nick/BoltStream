@@ -48,6 +48,7 @@ function Get-ToolPath {
 
 $Producer = Get-ToolPath -Name "boltstream-producer"
 $Consumer = Get-ToolPath -Name "boltstream-consumer"
+$Admin = Get-ToolPath -Name "boltstream-admin"
 
 Write-Host "Checking TCP broker port 9000 from operator machine."
 $client = [System.Net.Sockets.TcpClient]::new()
@@ -60,7 +61,16 @@ $client.EndConnect($async)
 $client.Close()
 Write-Host "TCP broker port 9000 reachable."
 
-$Topic = "live-phase4-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
+$Topic = "live-phase5-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
+$CreateOutput = & $Admin topics create --host $ExternalIp --port 9000 --token $BrokerToken --topic $Topic --partitions 3
+if ($LASTEXITCODE -ne 0) {
+  throw "Live create-topic failed with exit code $LASTEXITCODE. Output: $($CreateOutput -join "`n")"
+}
+$Created = ($CreateOutput -join "`n") | ConvertFrom-Json
+if (($Created.status -ne "created" -and $Created.status -ne "exists") -or $Created.partitions -ne 3) {
+  throw "Unexpected live create-topic output: $($Created | ConvertTo-Json -Compress)"
+}
+
 $ProduceOutput = & $Producer --host $ExternalIp --port 9000 --token $BrokerToken --topic $Topic --key AAPL --message "AAPL,100,192.41"
 if ($LASTEXITCODE -ne 0) {
   throw "Live producer failed with exit code $LASTEXITCODE. Output: $($ProduceOutput -join "`n")"
@@ -70,7 +80,7 @@ if ($Produced.status -ne "ok" -or $Produced.offset -ne 0 -or $Produced.next_offs
   throw "Unexpected live producer output: $($Produced | ConvertTo-Json -Compress)"
 }
 
-$ConsumerOutput = & $Consumer --host $ExternalIp --port 9000 --token $BrokerToken --topic $Topic --from beginning
+$ConsumerOutput = & $Consumer --host $ExternalIp --port 9000 --token $BrokerToken --topic $Topic --partition $Produced.partition --from beginning
 if ($LASTEXITCODE -ne 0) {
   throw "Live consumer failed with exit code $LASTEXITCODE. Output: $($ConsumerOutput -join "`n")"
 }

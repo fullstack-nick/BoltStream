@@ -110,6 +110,30 @@ bool parse_base_offset(const std::filesystem::path& path, std::uint64_t& base_of
   return parsed.ec == std::errc{} && parsed.ptr == end;
 }
 
+bool parse_partition_id(const std::filesystem::path& path, std::uint16_t& partition_id) {
+  const auto name = path.filename().string();
+  constexpr std::string_view prefix{"partition-"};
+  if (name.size() != prefix.size() + 6 || name.rfind(prefix, 0) != 0) {
+    return false;
+  }
+  for (std::size_t index = prefix.size(); index < name.size(); ++index) {
+    if (name[index] < '0' || name[index] > '9') {
+      return false;
+    }
+  }
+
+  unsigned int parsed = 0;
+  const auto* begin = name.data() + prefix.size();
+  const auto* end = name.data() + name.size();
+  const auto result = std::from_chars(begin, end, parsed);
+  if (result.ec != std::errc{} || result.ptr != end ||
+      parsed > std::numeric_limits<std::uint16_t>::max()) {
+    return false;
+  }
+  partition_id = static_cast<std::uint16_t>(parsed);
+  return true;
+}
+
 std::vector<SegmentInfo> list_segments(const std::filesystem::path& partition_dir) {
   std::vector<SegmentInfo> segments;
   std::error_code ec;
@@ -257,9 +281,6 @@ PartitionLog PartitionLog::open(PartitionLogOptions options) {
 PartitionLog::PartitionLog(PartitionLogOptions options) : options_(std::move(options)) {
   if (!is_valid_topic_name(options_.topic)) {
     throw std::invalid_argument("invalid topic name");
-  }
-  if (options_.partition_id != kPhaseThreePartition) {
-    throw std::invalid_argument("single-partition storage supports only partition 0");
   }
   if (options_.max_segment_bytes == 0) {
     throw std::invalid_argument("max_segment_bytes must be greater than zero");
@@ -512,19 +533,28 @@ StorageRecoverySummary recover_all_logs(const std::filesystem::path& data_dir,
       continue;
     }
 
-    const auto expected_partition_dir = partition_directory(data_dir, topic, kPhaseThreePartition);
-    if (!std::filesystem::exists(expected_partition_dir, ec)) {
-      continue;
-    }
+    bool topic_counted = false;
+    for (const auto& partition_entry : std::filesystem::directory_iterator(entry.path())) {
+      if (!partition_entry.is_directory()) {
+        continue;
+      }
+      std::uint16_t partition_id = 0;
+      if (!parse_partition_id(partition_entry.path(), partition_id)) {
+        continue;
+      }
 
-    auto log = PartitionLog::open({data_dir, topic, kPhaseThreePartition, max_segment_bytes});
-    const auto& stats = log.recovery_stats();
-    ++summary.topics_recovered;
-    ++summary.partitions_recovered;
-    summary.segments_scanned += stats.segments_scanned;
-    summary.indexes_rebuilt += stats.indexes_rebuilt;
-    summary.records_recovered += stats.records_recovered;
-    summary.bytes_truncated += stats.bytes_truncated;
+      auto log = PartitionLog::open({data_dir, topic, partition_id, max_segment_bytes});
+      const auto& stats = log.recovery_stats();
+      if (!topic_counted) {
+        ++summary.topics_recovered;
+        topic_counted = true;
+      }
+      ++summary.partitions_recovered;
+      summary.segments_scanned += stats.segments_scanned;
+      summary.indexes_rebuilt += stats.indexes_rebuilt;
+      summary.records_recovered += stats.records_recovered;
+      summary.bytes_truncated += stats.bytes_truncated;
+    }
   }
   return summary;
 }

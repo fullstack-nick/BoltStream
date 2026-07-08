@@ -92,6 +92,7 @@ add_library(boltstream_core
   src/client/async_client.cpp
   src/common/build_info.cpp
   src/protocol/protocol.cpp
+  src/storage/offset_store.cpp
   src/storage/partition_log.cpp)
 
 target_include_directories(boltstream_core
@@ -123,11 +124,15 @@ target_link_libraries(boltstream-bench PRIVATE boltstream_warnings)
 add_executable(boltstream-logtool tools/logtool_cli.cpp)
 target_link_libraries(boltstream-logtool PRIVATE boltstream_core boltstream_warnings)
 
+add_executable(boltstream-admin tools/admin_cli.cpp)
+target_link_libraries(boltstream-admin PRIVATE boltstream_core boltstream_warnings)
+
 install(TARGETS
   boltstream-server
   boltstream-producer
   boltstream-consumer
   boltstream-bench
+  boltstream-admin
   boltstream-logtool
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")

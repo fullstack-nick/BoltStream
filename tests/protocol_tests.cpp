@@ -79,7 +79,7 @@ TEST(ProtocolTests, RejectsInvalidLength) {
 TEST(ProtocolTests, RejectsUnsupportedVersion) {
   auto bytes =
       boltstream::protocol::encode_frame(boltstream::protocol::FrameType::HealthRequest, 7, {});
-  bytes[5] = 2;
+  bytes[5] = 3;
   refresh_header_crc(bytes);
 
   const auto decoded =
@@ -172,6 +172,22 @@ TEST(ProtocolTests, PhaseFourPayloadsRoundTrip) {
   ASSERT_TRUE(decoded.ok) << decoded.message;
   EXPECT_EQ(auth_response.status, "authenticated");
 
+  const auto create_payload = boltstream::protocol::encode_create_topic_request("trades", 3);
+  boltstream::protocol::CreateTopicRequest create_request;
+  decoded = boltstream::protocol::decode_create_topic_request(create_payload, create_request);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(create_request.topic, "trades");
+  EXPECT_EQ(create_request.partition_count, 3U);
+
+  const boltstream::protocol::CreateTopicResponse create_response{"trades", 3, "created"};
+  const auto create_response_payload =
+      boltstream::protocol::encode_create_topic_response(create_response);
+  boltstream::protocol::CreateTopicResponse decoded_create_response;
+  decoded = boltstream::protocol::decode_create_topic_response(create_response_payload,
+                                                               decoded_create_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(decoded_create_response.status, "created");
+
   const std::vector<std::uint8_t> request_key{'A'};
   const std::vector<std::uint8_t> request_message{'1'};
   const auto produce_request_payload =
@@ -182,6 +198,35 @@ TEST(ProtocolTests, PhaseFourPayloadsRoundTrip) {
   EXPECT_EQ(produce_request.topic, "trades");
   EXPECT_EQ(produce_request.key, (std::vector<std::uint8_t>{'A'}));
   EXPECT_EQ(produce_request.message, (std::vector<std::uint8_t>{'1'}));
+
+  const auto fetch_request_payload =
+      boltstream::protocol::encode_fetch_request("trades", 2, "committed", "dashboard", 250);
+  boltstream::protocol::FetchRequest fetch_request;
+  decoded = boltstream::protocol::decode_fetch_request(fetch_request_payload, fetch_request);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(fetch_request.topic, "trades");
+  EXPECT_EQ(fetch_request.partition, 2U);
+  EXPECT_EQ(fetch_request.from, "committed");
+  EXPECT_EQ(fetch_request.group, "dashboard");
+  EXPECT_EQ(fetch_request.max_wait_ms, 250U);
+
+  const boltstream::protocol::OffsetCommitRequest commit_request{"dashboard", "trades", 2, 11};
+  const auto commit_request_payload =
+      boltstream::protocol::encode_offset_commit_request(commit_request);
+  boltstream::protocol::OffsetCommitRequest decoded_commit_request;
+  decoded = boltstream::protocol::decode_offset_commit_request(commit_request_payload,
+                                                               decoded_commit_request);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(decoded_commit_request.next_offset, 11U);
+
+  const boltstream::protocol::OffsetCommitResponse commit_response{"dashboard", "trades", 2, 11};
+  const auto commit_response_payload =
+      boltstream::protocol::encode_offset_commit_response(commit_response);
+  boltstream::protocol::OffsetCommitResponse decoded_commit_response;
+  decoded = boltstream::protocol::decode_offset_commit_response(commit_response_payload,
+                                                                decoded_commit_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(decoded_commit_response.group, "dashboard");
 
   const boltstream::protocol::ProduceResponse produce_response{"trades", 0, 4, 5, 64};
   const auto produce_response_payload =

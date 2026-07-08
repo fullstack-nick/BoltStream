@@ -4,7 +4,7 @@ server:
 storage:
   data_dir: "/var/lib/boltstream"
 runtime:
-  phase: 3
-  protocol_version: 1
-  storage_format_version: 1
+  phase: 5
+  protocol_version: 2
+  storage_format_version: 2
   max_frame_bytes: 1048576

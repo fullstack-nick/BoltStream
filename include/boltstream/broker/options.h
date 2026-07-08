@@ -21,6 +21,8 @@ struct ServerOptions {
   std::uint32_t max_frame_bytes{1024 * 1024};
   std::uint32_t max_fetch_records{100};
   std::uint32_t max_fetch_bytes{1024 * 1024};
+  std::uint32_t max_topic_partitions{128};
+  std::uint32_t max_fetch_wait_ms{30000};
 };
 
 struct ParsedServerOptions {

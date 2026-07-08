@@ -1,7 +1,9 @@
 # BoltStream Storage
 
-Storage format version `1` is a durable single-partition, append-only log.
-Phase 4 uses this storage path for broker `ProduceRequest` and `FetchRequest`.
+Storage format version `2` is a durable multi-partition, append-only log with
+manifest-backed topic metadata and consumer group offset logs.
+Phase 5 uses this storage path for broker `CreateTopicRequest`, `ProduceRequest`,
+`FetchRequest`, and `OffsetCommitRequest`.
 `boltstream-logtool` remains available for direct inspection and recovery checks.
 
 ## Directory Layout
@@ -10,13 +12,22 @@ Phase 4 uses this storage path for broker `ProduceRequest` and `FetchRequest`.
 data/
   topics/
     trades/
+      manifest.json
       partition-000000/
         00000000000000000000.log
         00000000000000000000.index
+      partition-000001/
+        00000000000000000000.log
+        00000000000000000000.index
+  consumer_offsets/
+    dashboard/
+      offsets.log
 ```
 
-Only partition `0` exists in Phase 4. Topic names must match
-`[A-Za-z0-9._-]+` and must not be `.` or `..`.
+Topic names and consumer group names must match `[A-Za-z0-9._-]+` and must not
+be `.` or `..`. Topics are created explicitly with an immutable partition count.
+Manifestless Phase 4 topics are imported as single-partition topics during broker
+startup and receive a `manifest.json`.
 
 Segment names use the segment base offset as a zero-padded 20-digit decimal
 number. Segments roll by size. The default segment size is `256 MiB`; tests and
@@ -65,21 +76,31 @@ the first incomplete record, invalid record, or CRC mismatch, truncates the
 segment from that byte onward, deletes later segments if necessary, rebuilds
 indexes, and sets `next_offset` to one past the last valid recovered record.
 
-Broker startup opens existing `topics/*/partition-000000` logs, rebuilds indexes as
-needed, and writes recovery stats to `journalctl -u boltstream.service`. New topics are
-created lazily by the first valid broker produce request.
+Broker startup reads each topic manifest, opens all configured partition logs,
+rebuilds indexes as needed, imports legacy manifestless `partition-000000` topics,
+and writes recovery stats to `journalctl -u boltstream.service`. New topics are
+created through `boltstream-admin topics create` or the binary `CreateTopicRequest`.
+
+Consumer group offsets are stored in append-only text logs with CRC-protected records:
+
+```text
+topic<TAB>partition<TAB>next_offset<TAB>crc32<LF>
+```
+
+Offset recovery replays the latest offset per group/topic/partition and truncates
+the first corrupt or incomplete trailing offset record.
 
 ## Operator Commands
 
 ```powershell
 .\build\windows-gcc-debug\boltstream-logtool.exe append `
-  --data .\data --topic trades --key AAPL --message "AAPL,100,192.41"
+  --data .\data --topic trades --partition 0 --key AAPL --message "AAPL,100,192.41"
 
 .\build\windows-gcc-debug\boltstream-logtool.exe read `
-  --data .\data --topic trades --from 0 --max-records 10
+  --data .\data --topic trades --partition 0 --from 0 --max-records 10
 
 .\build\windows-gcc-debug\boltstream-logtool.exe recover `
-  --data .\data --topic trades
+  --data .\data --topic trades --partition 0
 ```
 
 For a repeatable local corruption/recovery check:

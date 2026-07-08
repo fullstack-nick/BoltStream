@@ -84,9 +84,25 @@ public:
   }
 
   template <typename CompletionToken>
-  auto async_fetch(std::string_view topic, std::string_view from, CompletionToken&& token) {
+  auto async_create_topic(std::string_view topic, std::uint16_t partition_count,
+                          CompletionToken&& token) {
+    return async_request(protocol::FrameType::CreateTopicRequest,
+                         protocol::encode_create_topic_request(topic, partition_count),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_fetch(std::string_view topic, std::uint16_t partition, std::string_view from,
+                   std::string_view group, std::uint32_t max_wait_ms, CompletionToken&& token) {
     return async_request(protocol::FrameType::FetchRequest,
-                         protocol::encode_fetch_request(topic, from),
+                         protocol::encode_fetch_request(topic, partition, from, group, max_wait_ms),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_offset_commit(const protocol::OffsetCommitRequest& request, CompletionToken&& token) {
+    return async_request(protocol::FrameType::OffsetCommitRequest,
+                         protocol::encode_offset_commit_request(request),
                          std::forward<CompletionToken>(token));
   }
 

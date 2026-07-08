@@ -20,20 +20,25 @@ struct ConsumerOptions {
   std::uint16_t port{9000};
   int timeout_ms{5000};
   std::string topic;
-  std::string from{"beginning"};
+  std::string from;
   std::string group;
+  std::uint16_t partition{0};
+  std::uint32_t wait_ms{0};
   std::string token;
   bool help_requested{false};
+  bool from_seen{false};
+  bool commit{false};
   std::string error;
 };
 
 void usage() {
-  std::cout << "Usage: boltstream-consumer --topic TOPIC [--from beginning|latest|OFFSET] "
-               "[--group GROUP]\n"
+  std::cout << "Usage: boltstream-consumer --topic TOPIC [--partition N] "
+               "[--from beginning|latest|committed|OFFSET] [--group GROUP]\n"
                "                           [--host HOST] [--port PORT] [--timeout-ms MS]\n"
-               "                           [--token TOKEN]\n"
+               "                           [--wait-ms MS] [--commit] [--token TOKEN]\n"
                "\n"
                "Sends a binary protocol FetchRequest and prints returned records as JSON.\n"
+               "If --group is set and --from is omitted, --from defaults to committed.\n"
                "If --token is omitted, BOLTSTREAM_BROKER_TOKEN is used when present.\n";
 }
 
@@ -44,6 +49,22 @@ bool parse_u16(std::string_view text, std::uint16_t& value) {
     std::size_t consumed = 0;
     parsed = std::stoul(as_string, &consumed);
     if (consumed != as_string.size() || parsed == 0 || parsed > 65535) {
+      return false;
+    }
+  } catch (...) {
+    return false;
+  }
+  value = static_cast<std::uint16_t>(parsed);
+  return true;
+}
+
+bool parse_partition(std::string_view text, std::uint16_t& value) {
+  unsigned long parsed = 0;
+  try {
+    const auto as_string = std::string{text};
+    std::size_t consumed = 0;
+    parsed = std::stoul(as_string, &consumed);
+    if (consumed != as_string.size() || parsed > 65535) {
       return false;
     }
   } catch (...) {
@@ -118,8 +139,23 @@ ConsumerOptions parse_options(int argc, char** argv) {
       options.topic = std::string{require_value(arg)};
     } else if (arg == "--from") {
       options.from = std::string{require_value(arg)};
+      options.from_seen = true;
     } else if (arg == "--group") {
       options.group = std::string{require_value(arg)};
+    } else if (arg == "--partition") {
+      if (!parse_partition(require_value(arg), options.partition)) {
+        options.error = "invalid --partition value";
+        return options;
+      }
+    } else if (arg == "--wait-ms") {
+      int wait_ms = 0;
+      if (!parse_int(require_value(arg), wait_ms)) {
+        options.error = "invalid --wait-ms value";
+        return options;
+      }
+      options.wait_ms = static_cast<std::uint32_t>(wait_ms);
+    } else if (arg == "--commit") {
+      options.commit = true;
     } else if (arg == "--token") {
       options.token = std::string{require_value(arg)};
     } else {
@@ -136,6 +172,10 @@ ConsumerOptions parse_options(int argc, char** argv) {
     }
     if (options.topic.empty()) {
       options.error = "--topic is required";
+    } else if (options.commit && options.group.empty()) {
+      options.error = "--commit requires --group";
+    } else if (options.from.empty()) {
+      options.from = options.group.empty() ? "beginning" : "committed";
     }
   }
   return options;
@@ -156,7 +196,8 @@ std::string as_string(const std::vector<std::uint8_t>& bytes) {
   return {bytes.begin(), bytes.end()};
 }
 
-int response_exit_code(const boltstream::protocol::Frame& frame) {
+int response_exit_code(const boltstream::protocol::Frame& frame,
+                       std::optional<std::uint64_t> committed_offset = std::nullopt) {
   if (frame.header.frame_type == boltstream::protocol::FrameType::FetchResponse) {
     boltstream::protocol::FetchResponse response;
     const auto decoded = boltstream::protocol::decode_fetch_response(frame.payload, response);
@@ -168,7 +209,11 @@ int response_exit_code(const boltstream::protocol::Frame& frame) {
     std::cout << "{\"status\":\"ok\",\"topic\":\"" << json_escape(response.topic)
               << "\",\"partition\":" << response.partition << ",\"from\":" << response.from_offset
               << ",\"count\":" << response.records.size()
-              << ",\"next_offset\":" << response.next_offset << ",\"records\":[";
+              << ",\"next_offset\":" << response.next_offset;
+    if (committed_offset) {
+      std::cout << ",\"committed_offset\":" << *committed_offset;
+    }
+    std::cout << ",\"records\":[";
     for (std::size_t index = 0; index < response.records.size(); ++index) {
       const auto& record = response.records[index];
       if (index > 0) {
@@ -202,6 +247,19 @@ int response_exit_code(const boltstream::protocol::Frame& frame) {
             << "\",\"message\":\"" << json_escape(response.message)
             << "\",\"correlation_id\":" << frame.header.correlation_id << "}\n";
   return response.code == boltstream::protocol::ErrorCode::NotImplemented ? 3 : 1;
+}
+
+bool decode_fetch_success(const boltstream::protocol::Frame& frame,
+                          boltstream::protocol::FetchResponse& response) {
+  if (frame.header.frame_type != boltstream::protocol::FrameType::FetchResponse) {
+    return false;
+  }
+  const auto decoded = boltstream::protocol::decode_fetch_response(frame.payload, response);
+  if (!decoded.ok) {
+    std::cerr << "boltstream-consumer: malformed fetch response: " << decoded.message << '\n';
+    return false;
+  }
+  return true;
 }
 
 bool auth_response_ok(const boltstream::protocol::Frame& frame) {
@@ -261,15 +319,68 @@ int main(int argc, char** argv) {
 
         auto send_fetch = [&, client] {
           client->async_fetch(
-              options.topic, options.from,
-              [&](const boost::system::error_code& request_ec, boltstream::protocol::Frame frame) {
+              options.topic, options.partition, options.from, options.group, options.wait_ms,
+              [&, client](const boost::system::error_code& request_ec,
+                          boltstream::protocol::Frame frame) {
                 if (request_ec) {
                   std::cerr << "boltstream-consumer: request failed: " << request_ec.message()
                             << '\n';
                   finish(1);
                   return;
                 }
-                finish(response_exit_code(frame));
+                if (!options.commit) {
+                  finish(response_exit_code(frame));
+                  return;
+                }
+
+                boltstream::protocol::FetchResponse fetch_response;
+                if (!decode_fetch_success(frame, fetch_response)) {
+                  finish(response_exit_code(frame));
+                  return;
+                }
+
+                boltstream::protocol::OffsetCommitRequest commit_request;
+                commit_request.group = options.group;
+                commit_request.topic = fetch_response.topic;
+                commit_request.partition = fetch_response.partition;
+                commit_request.next_offset = fetch_response.next_offset;
+
+                client->async_offset_commit(
+                    commit_request, [&, client, fetch_frame = std::move(frame)](
+                                        const boost::system::error_code& commit_ec,
+                                        boltstream::protocol::Frame commit_frame) mutable {
+                      if (commit_ec) {
+                        std::cerr << "boltstream-consumer: commit failed: " << commit_ec.message()
+                                  << '\n';
+                        finish(1);
+                        return;
+                      }
+                      if (commit_frame.header.frame_type ==
+                          boltstream::protocol::FrameType::ErrorResponse) {
+                        finish(response_exit_code(commit_frame));
+                        return;
+                      }
+                      if (commit_frame.header.frame_type !=
+                          boltstream::protocol::FrameType::OffsetCommitResponse) {
+                        std::cerr << "boltstream-consumer: unexpected commit response frame type "
+                                  << boltstream::protocol::frame_type_name(
+                                         commit_frame.header.frame_type)
+                                  << '\n';
+                        finish(1);
+                        return;
+                      }
+
+                      boltstream::protocol::OffsetCommitResponse commit_response;
+                      const auto decoded = boltstream::protocol::decode_offset_commit_response(
+                          commit_frame.payload, commit_response);
+                      if (!decoded.ok) {
+                        std::cerr << "boltstream-consumer: malformed commit response: "
+                                  << decoded.message << '\n';
+                        finish(1);
+                        return;
+                      }
+                      finish(response_exit_code(fetch_frame, commit_response.next_offset));
+                    });
               });
         };
 

@@ -161,6 +161,10 @@ std::string_view frame_type_name(FrameType frame_type) {
     return "auth_request";
   case FrameType::AuthResponse:
     return "auth_response";
+  case FrameType::CreateTopicRequest:
+    return "create_topic_request";
+  case FrameType::CreateTopicResponse:
+    return "create_topic_response";
   }
   return "unknown";
 }
@@ -187,6 +191,16 @@ std::string_view error_code_name(ErrorCode error_code) {
     return "reserved_flags";
   case ErrorCode::Unauthorized:
     return "unauthorized";
+  case ErrorCode::UnknownTopic:
+    return "unknown_topic";
+  case ErrorCode::TopicConflict:
+    return "topic_conflict";
+  case ErrorCode::InvalidPartition:
+    return "invalid_partition";
+  case ErrorCode::InvalidGroup:
+    return "invalid_group";
+  case ErrorCode::InvalidOffset:
+    return "invalid_offset";
   }
   return "unknown_error";
 }
@@ -199,6 +213,7 @@ bool is_request_type(FrameType frame_type) {
   case FrameType::FetchRequest:
   case FrameType::OffsetCommitRequest:
   case FrameType::AuthRequest:
+  case FrameType::CreateTopicRequest:
     return true;
   default:
     return false;
@@ -277,7 +292,7 @@ HeaderDecodeResult decode_header(std::span<const std::uint8_t> bytes,
   }
   if (result.header.flags != 0) {
     result.error = ErrorCode::ReservedFlags;
-    result.message = "reserved frame flags are not supported in protocol version 1";
+    result.message = "reserved frame flags are not supported in protocol version 2";
     return result;
   }
 
@@ -382,6 +397,49 @@ DecodeResult decode_auth_response(std::span<const std::uint8_t> payload, AuthRes
   return ok_result();
 }
 
+std::vector<std::uint8_t> encode_create_topic_request(std::string_view topic,
+                                                      std::uint16_t partition_count) {
+  std::vector<std::uint8_t> out;
+  write_string(out, topic);
+  write_u16(out, partition_count);
+  return out;
+}
+
+DecodeResult decode_create_topic_request(std::span<const std::uint8_t> payload,
+                                         CreateTopicRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.topic) || !reader.read_u16(request.partition_count) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed create-topic request payload");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "create-topic topic must not be empty");
+  }
+  if (request.partition_count == 0) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "create-topic partition count must be greater than zero");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_create_topic_response(const CreateTopicResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.topic);
+  write_u16(out, response.partition_count);
+  write_string(out, response.status);
+  return out;
+}
+
+DecodeResult decode_create_topic_response(std::span<const std::uint8_t> payload,
+                                          CreateTopicResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.topic) || !reader.read_u16(response.partition_count) ||
+      !reader.read_string(response.status) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed create-topic response payload");
+  }
+  return ok_result();
+}
+
 std::vector<std::uint8_t> encode_produce_request(std::string_view topic,
                                                  std::span<const std::uint8_t> key,
                                                  std::span<const std::uint8_t> message) {
@@ -413,16 +471,23 @@ DecodeResult validate_produce_request(std::span<const std::uint8_t> payload) {
   return decode_produce_request(payload, request);
 }
 
-std::vector<std::uint8_t> encode_fetch_request(std::string_view topic, std::string_view from) {
+std::vector<std::uint8_t> encode_fetch_request(std::string_view topic, std::uint16_t partition,
+                                               std::string_view from, std::string_view group,
+                                               std::uint32_t max_wait_ms) {
   std::vector<std::uint8_t> out;
   write_string(out, topic);
+  write_u16(out, partition);
   write_string(out, from);
+  write_string(out, group);
+  write_u32(out, max_wait_ms);
   return out;
 }
 
 DecodeResult decode_fetch_request(std::span<const std::uint8_t> payload, FetchRequest& request) {
   PayloadReader reader{payload};
-  if (!reader.read_string(request.topic) || !reader.read_string(request.from) || !reader.done()) {
+  if (!reader.read_string(request.topic) || !reader.read_u16(request.partition) ||
+      !reader.read_string(request.from) || !reader.read_string(request.group) ||
+      !reader.read_u32(request.max_wait_ms) || !reader.done()) {
     return error_result(ErrorCode::MalformedPayload, "malformed fetch request payload");
   }
   if (request.topic.empty()) {
@@ -437,6 +502,52 @@ DecodeResult decode_fetch_request(std::span<const std::uint8_t> payload, FetchRe
 DecodeResult validate_fetch_request(std::span<const std::uint8_t> payload) {
   FetchRequest request;
   return decode_fetch_request(payload, request);
+}
+
+std::vector<std::uint8_t> encode_offset_commit_request(const OffsetCommitRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.group);
+  write_string(out, request.topic);
+  write_u16(out, request.partition);
+  write_u64(out, request.next_offset);
+  return out;
+}
+
+DecodeResult decode_offset_commit_request(std::span<const std::uint8_t> payload,
+                                          OffsetCommitRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.group) || !reader.read_string(request.topic) ||
+      !reader.read_u16(request.partition) || !reader.read_u64(request.next_offset) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed offset-commit request payload");
+  }
+  if (request.group.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "offset-commit group must not be empty");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "offset-commit topic must not be empty");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_offset_commit_response(const OffsetCommitResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.group);
+  write_string(out, response.topic);
+  write_u16(out, response.partition);
+  write_u64(out, response.next_offset);
+  return out;
+}
+
+DecodeResult decode_offset_commit_response(std::span<const std::uint8_t> payload,
+                                           OffsetCommitResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.group) || !reader.read_string(response.topic) ||
+      !reader.read_u16(response.partition) || !reader.read_u64(response.next_offset) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed offset-commit response payload");
+  }
+  return ok_result();
 }
 
 std::vector<std::uint8_t> encode_produce_response(const ProduceResponse& response) {

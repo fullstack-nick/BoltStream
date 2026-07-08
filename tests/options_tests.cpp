@@ -21,6 +21,8 @@ TEST(OptionsTests, DefaultsMatchCurrentContract) {
   EXPECT_EQ(parsed.options.max_frame_bytes, 1024U * 1024U);
   EXPECT_EQ(parsed.options.max_fetch_records, 100U);
   EXPECT_EQ(parsed.options.max_fetch_bytes, 1024U * 1024U);
+  EXPECT_EQ(parsed.options.max_topic_partitions, 128U);
+  EXPECT_EQ(parsed.options.max_fetch_wait_ms, 30000U);
 }
 
 TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
@@ -37,6 +39,10 @@ TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
       std::string_view{"12"},
       std::string_view{"--max-fetch-bytes"},
       std::string_view{"2048"},
+      std::string_view{"--max-topic-partitions"},
+      std::string_view{"8"},
+      std::string_view{"--max-fetch-wait-ms"},
+      std::string_view{"500"},
   };
 
   const auto parsed = parse_server_options(args);
@@ -50,6 +56,8 @@ TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
   EXPECT_EQ(parsed.options.max_frame_bytes, 4096U);
   EXPECT_EQ(parsed.options.max_fetch_records, 12U);
   EXPECT_EQ(parsed.options.max_fetch_bytes, 2048U);
+  EXPECT_EQ(parsed.options.max_topic_partitions, 8U);
+  EXPECT_EQ(parsed.options.max_fetch_wait_ms, 500U);
 }
 
 TEST(OptionsTests, ParsesPortShortcut) {

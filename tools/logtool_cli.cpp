@@ -29,11 +29,11 @@ struct Options {
 void usage() {
   std::cout << "Usage:\n"
                "  boltstream-logtool append --data PATH --topic TOPIC --key KEY --message VALUE\n"
-               "                            [--segment-bytes BYTES] [--partition 0]\n"
+               "                            [--segment-bytes BYTES] [--partition N]\n"
                "  boltstream-logtool read --data PATH --topic TOPIC --from OFFSET --max-records N\n"
-               "                          [--segment-bytes BYTES] [--partition 0]\n"
+               "                          [--segment-bytes BYTES] [--partition N]\n"
                "  boltstream-logtool recover --data PATH --topic TOPIC\n"
-               "                             [--segment-bytes BYTES] [--partition 0]\n";
+               "                             [--segment-bytes BYTES] [--partition N]\n";
 }
 
 template <typename UInt> bool parse_uint(std::string_view text, UInt& value) {
@@ -98,9 +98,8 @@ Options parse_options(int argc, char** argv) {
         return options;
       }
     } else if (arg == "--partition") {
-      if (!parse_uint(require_value(arg), options.partition) ||
-          options.partition != boltstream::storage::kPhaseThreePartition) {
-        options.error = "single-partition storage supports only --partition 0";
+      if (!parse_uint(require_value(arg), options.partition)) {
+        options.error = "invalid --partition value";
         return options;
       }
     } else if (arg == "--segment-bytes") {

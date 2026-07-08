@@ -83,3 +83,7 @@ jobs:
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
           cmd /c "call `"$vcvars`" && cmake --preset windows-msvc-debug && cmake --build --preset build-windows-msvc-debug && ctest --preset test-windows-msvc-debug"
+
+      - name: Phase 5 smoke
+        shell: pwsh
+        run: ./scripts/smoke-phase5.ps1 -Preset windows-msvc-debug

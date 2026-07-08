@@ -26,6 +26,8 @@ BoltStream is complete when the repository proves all of the following:
 - Every appended message receives a stable topic, partition, and offset.
 - Consumers can read from `beginning`, `latest`, or an explicit offset.
 - Consumer groups commit and resume offsets.
+- Coordinated consumer groups support membership, heartbeats, automatic partition assignment, and rebalance behavior.
+- Retention and topic lifecycle tooling prevent unbounded disk growth.
 - The server restarts cleanly and rebuilds metadata from disk.
 - Crash recovery tests prove that partial writes do not corrupt committed data.
 - Benchmarks report throughput plus p50, p95, and p99 latency.
@@ -286,6 +288,7 @@ uint32 record_crc32
 - Consumers can fetch from `beginning`, `latest`, or an explicit offset.
 - Consumer groups are first-class.
 - Offset commits are written to durable offset logs.
+- Coordinated consumer groups use broker-managed membership, heartbeats, generation ids, automatic partition assignment, and rebalance behavior after the partition and offset foundation is stable.
 - Consumers use pull-based fetch requests.
 - Fetch supports max bytes, max records, and long-poll timeout.
 - Slow consumers are isolated from producers by bounded queues and fetch limits.
@@ -297,6 +300,16 @@ uint32 record_crc32
 - Consumer fetches are capped by response byte size and server-side in-flight limits.
 - The broker exposes metrics for queue depth, rejected requests, append latency, and fetch latency.
 - Overload behavior is deterministic and tested.
+
+### Topic Lifecycle and Retention
+
+- Topics are created explicitly before multi-partition produce.
+- Topic partition count is immutable after creation.
+- Operators can list, describe, and delete topics through checked-in tooling.
+- Segment retention is configurable by age and size.
+- Retention deletes only complete inactive segments and preserves recovery safety.
+- Fetching from an offset that has aged out returns a structured offset-out-of-range response.
+- Live proof must inspect disk usage, manifests, segment deletion, and topic lifecycle results.
 
 ### Replication Simulation
 
@@ -337,6 +350,8 @@ uint32 record_crc32
   - segment count and active segment bytes
   - recovery duration
   - rejected requests
+  - consumer group members, generations, rebalances, heartbeat failures, and commit failures
+  - retention-deleted segments and retained bytes
   - replication lag
 - Logs are structured and include correlation ids.
 
@@ -362,6 +377,8 @@ Required test categories:
 - Unit tests for segment append, read, roll, and index rebuild.
 - Broker integration tests using real TCP clients.
 - Consumer offset commit and resume tests.
+- Coordinated consumer group membership, heartbeat, generation, assignment, rebalance, and stale commit tests.
+- Retention and topic lifecycle tests for segment deletion, topic deletion, offset-out-of-range behavior, and manifest recovery.
 - Backpressure tests with bounded queues.
 - Crash recovery tests that kill the broker during writes.
 - Replication tests with leader and follower brokers.
@@ -377,6 +394,7 @@ The repository will contain:
 - `PLAN.md` for this implementation plan.
 - `docs/protocol.md` for binary protocol details.
 - `docs/storage.md` for log and recovery details.
+- `docs/admin.md` for topic lifecycle, retention, and consumer group operations.
 - `docs/benchmarks.md` for reproducible benchmark methodology and results.
 - `docs/operations.md` for running, tuning, metrics, and recovery.
 - `docs/gcp.md` for Terraform, SSH deployment, live verification, free-tier limits, and cost guardrails.
@@ -565,14 +583,17 @@ boltstream-consumer --topic trades --from beginning
 
 Deliverables:
 
+- Explicit create-topic protocol and admin CLI with immutable partition count.
 - Topic manifest with partition count.
 - Key-hash and round-robin partition selection.
 - Consumer group offset log.
 - Offset commit and resume.
 - Long-poll fetch.
+- Manual partition selection for consumers.
 
 Acceptance:
 
+- Topics are created explicitly before multi-partition produce.
 - Consumers resume from committed offsets after restart.
 - Partition distribution is deterministic and tested.
 - Long-poll fetch avoids tight polling loops.
@@ -593,7 +614,43 @@ Acceptance:
 - Overloaded producers receive retryable errors.
 - Abuse cases are covered by integration tests.
 
-### Phase 7: Metrics and Operations
+### Phase 7: Coordinated Consumer Groups
+
+Deliverables:
+
+- Broker-side group coordinator.
+- Join, leave, heartbeat, and sync-group style protocol flow.
+- Member ids, generation ids, session timeouts, and stale member fencing.
+- Automatic partition assignment across active group members.
+- Rebalance behavior when members join, leave, crash, or time out.
+- Offset commits fenced by group generation.
+
+Acceptance:
+
+- Consumers in the same group divide topic partitions automatically.
+- Rebalances are deterministic and tested for join, leave, timeout, and restart cases.
+- Stale members cannot commit offsets for an old generation.
+- Live GCP proof shows two consumers sharing partitions, then one consumer taking over after the other stops heartbeating.
+
+### Phase 8: Retention and Topic Lifecycle
+
+Deliverables:
+
+- Configurable segment retention by age and size.
+- Safe deletion of inactive retained segments.
+- Topic list, describe, and delete commands in `boltstream-admin`.
+- Consumer group describe and reset-offset commands.
+- Offset-out-of-range responses when retained data no longer contains the requested offset.
+- Operational documentation for disk growth and cleanup.
+
+Acceptance:
+
+- Retention frees disk without corrupting active partitions or recovery.
+- Topic deletion removes manifests, partition logs, and related metadata safely.
+- Admin lifecycle commands work locally and against the live GCP broker.
+- Live proof records before/after disk and file-state inspection.
+
+### Phase 9: Metrics and Operations
 
 Deliverables:
 
@@ -608,7 +665,7 @@ Acceptance:
 - Metrics expose traffic, latency, storage, queue, and error state.
 - A local operator can diagnose throughput, slow consumers, and disk growth from metrics and logs.
 
-### Phase 8: Benchmarking and Performance Engineering
+### Phase 10: Benchmarking and Performance Engineering
 
 Deliverables:
 
@@ -624,7 +681,7 @@ Acceptance:
 - README benchmark table is generated from reproducible commands.
 - Benchmarks state hardware, OS, compiler, build type, payload size, durability mode, and client counts.
 
-### Phase 9: Compression
+### Phase 11: Compression
 
 Deliverables:
 
@@ -638,7 +695,7 @@ Acceptance:
 - zstd and uncompressed clients interoperate according to negotiated capabilities.
 - Benchmarks compare throughput, latency, and bytes written.
 
-### Phase 10: Replication Simulation
+### Phase 12: Replication Simulation
 
 Deliverables:
 
@@ -654,7 +711,7 @@ Acceptance:
 - Produce acknowledgements respect replication mode.
 - Restarted follower resumes from its last replicated offset.
 
-### Phase 11: Crash Recovery Proof
+### Phase 13: Crash Recovery Proof
 
 Deliverables:
 
@@ -669,7 +726,7 @@ Acceptance:
 - Recovered logs contain exactly the committed valid records.
 - README includes the recovery proof command and result summary.
 
-### Phase 12: Recruiter-Grade Polish
+### Phase 14: Recruiter-Grade Polish
 
 Deliverables:
 
@@ -710,6 +767,7 @@ boltstream/
   docs/
     protocol.md
     storage.md
+    admin.md
     benchmarks.md
     operations.md
     gcp.md
@@ -827,6 +885,12 @@ These decisions have locked default answers. Before coding, confirm each one aga
 15. How should public access be handled on the live VM?
     - Proposed locked answer: broker writes require authentication, admin/metrics stay localhost or trusted-source only, and Terraform-managed firewall rules stay narrow by default.
 
+16. When should Kafka-style coordinated consumer groups be implemented?
+    - Proposed locked answer: after Phase 6 backpressure and robustness, before metrics and benchmarking. Phase 5 implements the partition and durable-offset foundation; Phase 7 adds membership, heartbeats, automatic assignment, generation fencing, and rebalancing.
+
+17. Does the product need retention and lifecycle tooling before it is complete?
+    - Proposed locked answer: yes. Add a dedicated phase after coordinated consumer groups and before metrics so disk growth, topic deletion, group inspection, and offset reset behavior are real product features instead of ad hoc operator cleanup.
+
 ## README Outcome Target
 
 The final README should show this feature summary:
@@ -838,7 +902,8 @@ Features:
 - TCP broker with custom binary protocol
 - Append-only durable log storage
 - Topic partitions and stable offsets
-- Consumer groups with durable offset commits
+- Consumer groups with durable offset commits and coordinated rebalancing
+- Topic retention, lifecycle, and admin tooling
 - Free-tier-conscious GCP deployment with Terraform, SSH, and systemd
 - Per-phase live GCP proof tied to pushed GitHub commits
 - Multi-threaded producer/consumer pipeline
