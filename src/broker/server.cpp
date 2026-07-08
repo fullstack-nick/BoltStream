@@ -1,5 +1,6 @@
 #include "boltstream/broker/server.h"
 
+#include "boltstream/broker/group_coordinator.h"
 #include "boltstream/protocol/protocol.h"
 #include "boltstream/storage/offset_store.h"
 #include "boltstream/storage/partition_log.h"
@@ -120,6 +121,8 @@ struct StructuredLogFields {
   std::optional<std::uint32_t> append_queue_depth;
   std::optional<std::uint32_t> waiter_count;
   std::optional<std::uint64_t> request_duration_ms;
+  std::map<std::string, std::string> string_fields;
+  std::map<std::string, std::uint64_t> numeric_fields;
 };
 
 std::mutex& structured_log_mutex() {
@@ -160,6 +163,12 @@ void write_structured_log(const StructuredLogFields& fields) {
   if (fields.request_duration_ms) {
     out << ",\"request_duration_ms\":" << *fields.request_duration_ms;
   }
+  for (const auto& [key, value] : fields.string_fields) {
+    out << ",\"" << json_escape(key) << "\":\"" << json_escape(value) << "\"";
+  }
+  for (const auto& [key, value] : fields.numeric_fields) {
+    out << ",\"" << json_escape(key) << "\":" << value;
+  }
   if (!fields.message.empty()) {
     out << ",\"message\":\"" << json_escape(fields.message) << "\"";
   }
@@ -171,6 +180,17 @@ void write_structured_log(const StructuredLogFields& fields) {
 
 std::string endpoint_string(const boost::asio::ip::tcp::endpoint& endpoint) {
   return endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
+}
+
+std::string assignment_string(const std::vector<std::uint16_t>& assignment) {
+  std::ostringstream out;
+  for (std::size_t index = 0; index < assignment.size(); ++index) {
+    if (index > 0) {
+      out << ",";
+    }
+    out << assignment[index];
+  }
+  return out.str();
 }
 
 std::optional<std::string> json_string_field(std::string_view json, std::string_view name) {
@@ -522,6 +542,11 @@ public:
     validate_group_or_throw(request.group);
     auto topic = find_topic_or_throw(request.topic);
     auto partition = partition_or_throw(*topic, request.partition);
+    log_group_expirations(group_coordinator_.expire(request.group, request.topic));
+    if (group_coordinator_.has_active_members(request.group, request.topic)) {
+      throw BrokerRequestError{protocol::ErrorCode::StaleMember,
+                               "legacy offset commit is fenced by active coordinated group"};
+    }
     std::lock_guard log_lock{partition->log_mutex};
     if (request.next_offset > partition->log.next_offset()) {
       throw BrokerRequestError{protocol::ErrorCode::InvalidOffset,
@@ -531,6 +556,103 @@ public:
     std::lock_guard offset_lock{offsets_mutex_};
     offset_store_.commit(request.group, request.topic, request.partition, request.next_offset);
     return {request.group, request.topic, request.partition, request.next_offset};
+  }
+
+  protocol::JoinGroupResponse join_group(const protocol::JoinGroupRequest& request) {
+    validate_group_or_throw(request.group);
+    auto topic = find_topic_or_throw(request.topic);
+    GroupCoordinator::Result result;
+    try {
+      result = group_coordinator_.join(request.group, request.topic, request.member_id,
+                                       request.session_timeout_ms, topic->partition_count);
+    } catch (const GroupCoordinatorError& error) {
+      throw BrokerRequestError{error.code(), error.what()};
+    }
+    log_expired_members(result);
+    if (result.member_joined) {
+      log_group_result("group_member_joined", result);
+    }
+    if (result.generation_changed) {
+      log_group_result("group_rebalanced", result);
+    }
+    return {result.group, result.topic, result.member_id, result.generation_id};
+  }
+
+  protocol::SyncGroupResponse sync_group(const protocol::SyncGroupRequest& request) {
+    validate_group_or_throw(request.group);
+    (void)find_topic_or_throw(request.topic);
+    log_group_expirations(group_coordinator_.expire(request.group, request.topic));
+    GroupCoordinator::Result result;
+    try {
+      result = group_coordinator_.sync(request.group, request.topic, request.member_id,
+                                       request.generation_id);
+    } catch (const GroupCoordinatorError& error) {
+      throw BrokerRequestError{error.code(), error.what()};
+    }
+    return {result.group, result.topic, result.member_id, result.generation_id, result.assignment};
+  }
+
+  protocol::HeartbeatResponse heartbeat_group(const protocol::HeartbeatRequest& request) {
+    validate_group_or_throw(request.group);
+    (void)find_topic_or_throw(request.topic);
+    log_group_expirations(group_coordinator_.expire(request.group, request.topic));
+    GroupCoordinator::Result result;
+    try {
+      result = group_coordinator_.heartbeat(request.group, request.topic, request.member_id,
+                                            request.generation_id);
+    } catch (const GroupCoordinatorError& error) {
+      throw BrokerRequestError{error.code(), error.what()};
+    }
+    log_group_result("group_heartbeat", result);
+    return {result.group, result.topic, result.member_id, result.generation_id, "ok"};
+  }
+
+  protocol::LeaveGroupResponse leave_group(const protocol::LeaveGroupRequest& request) {
+    validate_group_or_throw(request.group);
+    (void)find_topic_or_throw(request.topic);
+    log_group_expirations(group_coordinator_.expire(request.group, request.topic));
+    GroupCoordinator::Result result;
+    try {
+      result = group_coordinator_.leave(request.group, request.topic, request.member_id,
+                                        request.generation_id);
+    } catch (const GroupCoordinatorError& error) {
+      throw BrokerRequestError{error.code(), error.what()};
+    }
+    log_group_result("group_member_left", result);
+    if (result.generation_changed) {
+      log_group_result("group_rebalanced", result);
+    }
+    return {result.group, result.topic, result.member_id, result.generation_id, "left"};
+  }
+
+  protocol::GroupOffsetCommitResponse
+  commit_group_offset(const protocol::GroupOffsetCommitRequest& request) {
+    validate_group_or_throw(request.group);
+    auto topic = find_topic_or_throw(request.topic);
+    auto partition = partition_or_throw(*topic, request.partition);
+    std::lock_guard log_lock{partition->log_mutex};
+    if (request.next_offset > partition->log.next_offset()) {
+      log_group_commit_rejected(request, protocol::ErrorCode::InvalidOffset,
+                                "commit offset is beyond partition next offset");
+      throw BrokerRequestError{protocol::ErrorCode::InvalidOffset,
+                               "commit offset is beyond partition next offset"};
+    }
+
+    GroupCoordinator::Result result;
+    try {
+      log_group_expirations(group_coordinator_.expire(request.group, request.topic));
+      result = group_coordinator_.validate_commit(request.group, request.topic, request.member_id,
+                                                  request.generation_id, request.partition);
+    } catch (const GroupCoordinatorError& error) {
+      log_group_commit_rejected(request, error.code(), error.what());
+      throw BrokerRequestError{error.code(), error.what()};
+    }
+
+    std::lock_guard offset_lock{offsets_mutex_};
+    offset_store_.commit(request.group, request.topic, request.partition, request.next_offset);
+    log_group_commit(request, result);
+    return {request.group,        request.topic,     request.member_id,
+            result.generation_id, request.partition, request.next_offset};
   }
 
   protocol::MetadataResponse metadata() const {
@@ -880,6 +1002,61 @@ private:
     return parsed.ec == std::errc{} && parsed.ptr == end;
   }
 
+  void log_group_expirations(const GroupCoordinator::Result& result) {
+    log_expired_members(result);
+    if (result.generation_changed) {
+      log_group_result("group_rebalanced", result);
+    }
+  }
+
+  void log_expired_members(const GroupCoordinator::Result& result) {
+    for (const auto& member_id : result.expired_member_ids) {
+      auto fields = group_log_fields("group_member_expired", result);
+      fields.string_fields["member_id"] = member_id;
+      write_structured_log(fields);
+    }
+  }
+
+  static StructuredLogFields group_log_fields(std::string event,
+                                              const GroupCoordinator::Result& result) {
+    StructuredLogFields fields{"info", std::move(event)};
+    fields.string_fields["group"] = result.group;
+    fields.string_fields["topic"] = result.topic;
+    if (!result.member_id.empty()) {
+      fields.string_fields["member_id"] = result.member_id;
+    }
+    fields.string_fields["assignment"] = assignment_string(result.assignment);
+    fields.numeric_fields["generation_id"] = result.generation_id;
+    return fields;
+  }
+
+  void log_group_result(std::string event, const GroupCoordinator::Result& result) {
+    write_structured_log(group_log_fields(std::move(event), result));
+  }
+
+  void log_group_commit(const protocol::GroupOffsetCommitRequest& request,
+                        const GroupCoordinator::Result& result) {
+    auto fields = group_log_fields("group_offset_committed", result);
+    fields.numeric_fields["partition"] = request.partition;
+    fields.numeric_fields["next_offset"] = request.next_offset;
+    write_structured_log(fields);
+  }
+
+  void log_group_commit_rejected(const protocol::GroupOffsetCommitRequest& request,
+                                 protocol::ErrorCode error_code, std::string_view message) {
+    StructuredLogFields fields{"warn", "group_offset_commit_rejected"};
+    fields.error_code = std::string{protocol::error_code_name(error_code)};
+    fields.message = std::string{message};
+    fields.retryable = protocol::is_retryable_error(error_code);
+    fields.string_fields["group"] = request.group;
+    fields.string_fields["topic"] = request.topic;
+    fields.string_fields["member_id"] = request.member_id;
+    fields.numeric_fields["generation_id"] = request.generation_id;
+    fields.numeric_fields["partition"] = request.partition;
+    fields.numeric_fields["next_offset"] = request.next_offset;
+    write_structured_log(fields);
+  }
+
   std::filesystem::path data_dir_;
   std::uint32_t max_frame_bytes_;
   std::uint32_t max_fetch_records_;
@@ -894,6 +1071,7 @@ private:
   std::map<std::string, std::shared_ptr<TopicState>> topics_;
   mutable std::mutex offsets_mutex_;
   storage::OffsetStore offset_store_;
+  GroupCoordinator group_coordinator_;
   std::mutex append_work_mutex_;
   std::condition_variable append_work_cv_;
   std::deque<ReadyAppend> ready_appends_;
@@ -1042,6 +1220,21 @@ private:
       return;
     case protocol::FrameType::CreateTopicRequest:
       handle_create_topic(std::move(frame));
+      return;
+    case protocol::FrameType::JoinGroupRequest:
+      handle_join_group(std::move(frame));
+      return;
+    case protocol::FrameType::SyncGroupRequest:
+      handle_sync_group(std::move(frame));
+      return;
+    case protocol::FrameType::HeartbeatRequest:
+      handle_heartbeat(std::move(frame));
+      return;
+    case protocol::FrameType::LeaveGroupRequest:
+      handle_leave_group(std::move(frame));
+      return;
+    case protocol::FrameType::GroupOffsetCommitRequest:
+      handle_group_offset_commit(std::move(frame));
       return;
     default:
       write_error(frame.header.correlation_id, protocol::ErrorCode::UnsupportedRequest,
@@ -1318,6 +1511,176 @@ private:
       const auto payload = protocol::encode_offset_commit_response(response);
       write_frame(protocol::FrameType::OffsetCommitResponse, frame.header.correlation_id, payload,
                   false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_join_group(protocol::Frame frame) {
+    protocol::JoinGroupRequest request;
+    const auto decoded = protocol::decode_join_group_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_group_name(request.group)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InvalidGroup,
+                  "invalid consumer group name", true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.join_group(request);
+      const auto payload = protocol::encode_join_group_response(response);
+      write_frame(protocol::FrameType::JoinGroupResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_sync_group(protocol::Frame frame) {
+    protocol::SyncGroupRequest request;
+    const auto decoded = protocol::decode_sync_group_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_group_name(request.group)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InvalidGroup,
+                  "invalid consumer group name", true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.sync_group(request);
+      const auto payload = protocol::encode_sync_group_response(response);
+      write_frame(protocol::FrameType::SyncGroupResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_heartbeat(protocol::Frame frame) {
+    protocol::HeartbeatRequest request;
+    const auto decoded = protocol::decode_heartbeat_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_group_name(request.group)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InvalidGroup,
+                  "invalid consumer group name", true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.heartbeat_group(request);
+      const auto payload = protocol::encode_heartbeat_response(response);
+      write_frame(protocol::FrameType::HeartbeatResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_leave_group(protocol::Frame frame) {
+    protocol::LeaveGroupRequest request;
+    const auto decoded = protocol::decode_leave_group_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_group_name(request.group)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InvalidGroup,
+                  "invalid consumer group name", true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.leave_group(request);
+      const auto payload = protocol::encode_leave_group_response(response);
+      write_frame(protocol::FrameType::LeaveGroupResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
+                  false);
+    }
+  }
+
+  void handle_group_offset_commit(protocol::Frame frame) {
+    protocol::GroupOffsetCommitRequest request;
+    const auto decoded = protocol::decode_group_offset_commit_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!storage::is_valid_group_name(request.group)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InvalidGroup,
+                  "invalid consumer group name", true);
+      return;
+    }
+    if (!storage::is_valid_topic_name(request.topic)) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::MalformedPayload,
+                  "invalid topic name", true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+
+    try {
+      const auto response = runtime_.commit_group_offset(request);
+      const auto payload = protocol::encode_group_offset_commit_response(response);
+      write_frame(protocol::FrameType::GroupOffsetCommitResponse, frame.header.correlation_id,
+                  payload, false);
     } catch (const BrokerRequestError& error) {
       write_error(frame.header.correlation_id, error.code(), error.what(), false);
     } catch (const std::exception& error) {

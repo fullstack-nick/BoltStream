@@ -6,7 +6,7 @@
 .\scripts\toolchain-check.ps1
 .\scripts\build.ps1 -Preset windows-gcc-debug
 .\scripts\test.ps1 -Preset windows-gcc-debug
-.\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase7.ps1 -Preset windows-gcc-debug
 .\scripts\format.ps1
 ```
 
@@ -46,6 +46,10 @@ Broker protocol smoke:
   --host 127.0.0.1 --port 9000 `
   --topic trades --from beginning
 
+.\build\windows-gcc-debug\boltstream-consumer.exe `
+  --host 127.0.0.1 --port 9000 `
+  --topic trades --group dashboard --commit --coordinated
+
 .\build\windows-gcc-debug\boltstream-logtool.exe append `
   --data .\data `
   --topic trades `
@@ -67,6 +71,7 @@ Repeatable storage smoke:
 
 ```powershell
 .\scripts\smoke-phase6.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase7.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
 ```
@@ -77,6 +82,14 @@ Backpressure behavior:
 - `--max-append-queue-depth 0` rejects produces without appending records.
 - `--max-long-poll-waiters 0` rejects waiting fetches while immediate fetches still work.
 - Broker runtime logs are JSON lines with event names, correlation ids, retryable flags, queue/waiter state, and request duration.
+
+Coordinated consumer group behavior:
+
+- `boltstream-consumer --coordinated --group GROUP --commit` joins one topic-scoped group coordinator.
+- Members heartbeat with broker-assigned member ids and generation ids.
+- The broker assigns contiguous partition ranges across sorted member ids and rebalances on join, leave, and session timeout.
+- Coordinated offset commits are fenced by member id, generation id, and partition ownership.
+- Runtime logs include `group_member_joined`, `group_rebalanced`, `group_member_expired`, `group_heartbeat`, `group_member_left`, `group_offset_committed`, and `group_offset_commit_rejected`.
 
 ## Linux Service Layout
 

@@ -2,22 +2,23 @@
 
 BoltStream is a C++20 low-latency event streaming engine: a Kafka-inspired broker built from scratch to demonstrate Linux networking, durable storage, concurrency, testing, performance measurement, and cloud-native deployment.
 
-Phase 6 adds bounded broker resource use, retryable overload responses,
-structured JSON broker logs, per-partition append backpressure, fetch response
-caps, and deterministic abuse-case coverage over the binary TCP protocol.
+Phase 7 adds broker-managed coordinated consumer groups with membership,
+heartbeats, generation fencing, deterministic partition assignment, rebalancing,
+and timeout takeover on top of the bounded Phase 6 broker runtime.
 
-## Current Phase 6 Surface
+## Current Phase 7 Surface
 
 - `boltstream-server` opens broker TCP port `9000`.
 - Admin HTTP listens on `127.0.0.1:9100`.
 - `GET /health/live` reports process liveness.
 - `GET /health/ready` reports data-directory readiness.
-- `GET /version` reports service name, Git SHA, build type, compiler, protocol version `2`, storage format version `2`, and startup time.
+- `GET /version` reports service name, Git SHA, build type, compiler, protocol version `3`, storage format version `2`, and startup time.
 - Broker TCP port `9000` accepts versioned binary frames with correlation ids and structured error responses.
 - `boltstream-admin topics create` creates topics with an immutable partition count before produce.
 - `boltstream-producer` appends durable records through the broker and prints assigned topic, partition, offset, and next offset.
 - `boltstream-consumer` fetches durable records from `beginning`, `latest`, `committed`, or an explicit offset for a chosen partition.
 - `boltstream-consumer --group GROUP --commit` commits the returned partition `next_offset` to a durable group offset log.
+- `boltstream-consumer --coordinated --group GROUP --commit` joins a broker-managed group, receives automatic partition assignments, heartbeats, rejoins on rebalances, and commits offsets fenced by member generation.
 - Long-poll fetch is available with `boltstream-consumer --wait-ms MS`.
 - Append queues are bounded per partition and return retryable `overloaded` errors instead of growing without limit.
 - Long-poll waiter state, broker sessions, frame sizes, fetch records, and fetch bytes are bounded by server options.
@@ -60,6 +61,7 @@ curl.exe -fsS http://127.0.0.1:9100/version
 .\build\windows-gcc-debug\boltstream-producer.exe --topic trades --key AAPL --message "AAPL,100,192.41"
 .\build\windows-gcc-debug\boltstream-consumer.exe --topic trades --partition 0 --from beginning
 .\build\windows-gcc-debug\boltstream-consumer.exe --topic trades --partition 0 --group dashboard --commit
+.\build\windows-gcc-debug\boltstream-consumer.exe --topic trades --group dashboard --commit --coordinated
 .\build\windows-gcc-debug\boltstream-logtool.exe append --data .\data --topic trades --key AAPL --message "AAPL,100,192.41"
 .\build\windows-gcc-debug\boltstream-logtool.exe read --data .\data --topic trades --from 0 --max-records 10
 ```
@@ -72,6 +74,7 @@ For a repeatable local smoke:
 ```powershell
 .\scripts\smoke-phase5.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase6.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase7.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
 ```
@@ -102,4 +105,5 @@ Durable acceptance records live under `proof/`. Phase 1 is recorded in
 GCP deploy, live storage calls, SSH log/data-file inspection, and runtime version
 verification pass. Phase 4 evidence is recorded in [proof/phase-4.md](proof/phase-4.md).
 Phase 5 evidence is recorded in [proof/phase-5.md](proof/phase-5.md). Phase 6 evidence
-is recorded in [proof/phase-6.md](proof/phase-6.md).
+is recorded in [proof/phase-6.md](proof/phase-6.md). Phase 7 evidence is recorded in
+[proof/phase-7.md](proof/phase-7.md) after live coordinated group proof.

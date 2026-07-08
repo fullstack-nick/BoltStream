@@ -87,6 +87,7 @@ else()
 endif()
 
 add_library(boltstream_core
+  src/broker/group_coordinator.cpp
   src/broker/options.cpp
   src/broker/server.cpp
   src/client/async_client.cpp
@@ -151,6 +152,7 @@ if(BOLTSTREAM_BUILD_TESTS AND BUILD_TESTING)
   add_executable(boltstream_tests
     tests/build_info_tests.cpp
     tests/client_broker_tests.cpp
+    tests/group_coordinator_tests.cpp
     tests/options_tests.cpp
     tests/protocol_tests.cpp
     tests/storage_tests.cpp)

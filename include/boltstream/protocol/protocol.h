@@ -9,7 +9,7 @@
 namespace boltstream::protocol {
 
 inline constexpr std::uint32_t kMagic = 0x42535452U;
-inline constexpr std::uint16_t kProtocolVersion = 2;
+inline constexpr std::uint16_t kProtocolVersion = 3;
 inline constexpr std::uint32_t kFrameHeaderBytes = 32;
 inline constexpr std::uint32_t kDefaultMaxFrameBytes = 1024 * 1024;
 
@@ -29,6 +29,16 @@ enum class FrameType : std::uint16_t {
   AuthResponse = 13,
   CreateTopicRequest = 14,
   CreateTopicResponse = 15,
+  JoinGroupRequest = 16,
+  JoinGroupResponse = 17,
+  SyncGroupRequest = 18,
+  SyncGroupResponse = 19,
+  HeartbeatRequest = 20,
+  HeartbeatResponse = 21,
+  LeaveGroupRequest = 22,
+  LeaveGroupResponse = 23,
+  GroupOffsetCommitRequest = 24,
+  GroupOffsetCommitResponse = 25,
 };
 
 enum class ErrorCode : std::uint32_t {
@@ -48,6 +58,8 @@ enum class ErrorCode : std::uint32_t {
   InvalidGroup = 14,
   InvalidOffset = 15,
   Overloaded = 16,
+  RebalanceRequired = 17,
+  StaleMember = 18,
 };
 
 struct FrameHeader {
@@ -133,6 +145,83 @@ struct OffsetCommitRequest {
 struct OffsetCommitResponse {
   std::string group;
   std::string topic;
+  std::uint16_t partition{0};
+  std::uint64_t next_offset{0};
+};
+
+struct JoinGroupRequest {
+  std::string group;
+  std::string topic;
+  std::string member_id;
+  std::uint32_t session_timeout_ms{0};
+};
+
+struct JoinGroupResponse {
+  std::string group;
+  std::string topic;
+  std::string member_id;
+  std::uint64_t generation_id{0};
+};
+
+struct SyncGroupRequest {
+  std::string group;
+  std::string topic;
+  std::string member_id;
+  std::uint64_t generation_id{0};
+};
+
+struct SyncGroupResponse {
+  std::string group;
+  std::string topic;
+  std::string member_id;
+  std::uint64_t generation_id{0};
+  std::vector<std::uint16_t> assignment;
+};
+
+struct HeartbeatRequest {
+  std::string group;
+  std::string topic;
+  std::string member_id;
+  std::uint64_t generation_id{0};
+};
+
+struct HeartbeatResponse {
+  std::string group;
+  std::string topic;
+  std::string member_id;
+  std::uint64_t generation_id{0};
+  std::string status;
+};
+
+struct LeaveGroupRequest {
+  std::string group;
+  std::string topic;
+  std::string member_id;
+  std::uint64_t generation_id{0};
+};
+
+struct LeaveGroupResponse {
+  std::string group;
+  std::string topic;
+  std::string member_id;
+  std::uint64_t generation_id{0};
+  std::string status;
+};
+
+struct GroupOffsetCommitRequest {
+  std::string group;
+  std::string topic;
+  std::string member_id;
+  std::uint64_t generation_id{0};
+  std::uint16_t partition{0};
+  std::uint64_t next_offset{0};
+};
+
+struct GroupOffsetCommitResponse {
+  std::string group;
+  std::string topic;
+  std::string member_id;
+  std::uint64_t generation_id{0};
   std::uint16_t partition{0};
   std::uint64_t next_offset{0};
 };
@@ -224,6 +313,43 @@ DecodeResult decode_offset_commit_request(std::span<const std::uint8_t> payload,
 std::vector<std::uint8_t> encode_offset_commit_response(const OffsetCommitResponse& response);
 DecodeResult decode_offset_commit_response(std::span<const std::uint8_t> payload,
                                            OffsetCommitResponse& response);
+
+std::vector<std::uint8_t> encode_join_group_request(const JoinGroupRequest& request);
+DecodeResult decode_join_group_request(std::span<const std::uint8_t> payload,
+                                       JoinGroupRequest& request);
+std::vector<std::uint8_t> encode_join_group_response(const JoinGroupResponse& response);
+DecodeResult decode_join_group_response(std::span<const std::uint8_t> payload,
+                                        JoinGroupResponse& response);
+
+std::vector<std::uint8_t> encode_sync_group_request(const SyncGroupRequest& request);
+DecodeResult decode_sync_group_request(std::span<const std::uint8_t> payload,
+                                       SyncGroupRequest& request);
+std::vector<std::uint8_t> encode_sync_group_response(const SyncGroupResponse& response);
+DecodeResult decode_sync_group_response(std::span<const std::uint8_t> payload,
+                                        SyncGroupResponse& response);
+
+std::vector<std::uint8_t> encode_heartbeat_request(const HeartbeatRequest& request);
+DecodeResult decode_heartbeat_request(std::span<const std::uint8_t> payload,
+                                      HeartbeatRequest& request);
+std::vector<std::uint8_t> encode_heartbeat_response(const HeartbeatResponse& response);
+DecodeResult decode_heartbeat_response(std::span<const std::uint8_t> payload,
+                                       HeartbeatResponse& response);
+
+std::vector<std::uint8_t> encode_leave_group_request(const LeaveGroupRequest& request);
+DecodeResult decode_leave_group_request(std::span<const std::uint8_t> payload,
+                                        LeaveGroupRequest& request);
+std::vector<std::uint8_t> encode_leave_group_response(const LeaveGroupResponse& response);
+DecodeResult decode_leave_group_response(std::span<const std::uint8_t> payload,
+                                         LeaveGroupResponse& response);
+
+std::vector<std::uint8_t>
+encode_group_offset_commit_request(const GroupOffsetCommitRequest& request);
+DecodeResult decode_group_offset_commit_request(std::span<const std::uint8_t> payload,
+                                                GroupOffsetCommitRequest& request);
+std::vector<std::uint8_t>
+encode_group_offset_commit_response(const GroupOffsetCommitResponse& response);
+DecodeResult decode_group_offset_commit_response(std::span<const std::uint8_t> payload,
+                                                 GroupOffsetCommitResponse& response);
 
 std::vector<std::uint8_t> encode_produce_response(const ProduceResponse& response);
 DecodeResult decode_produce_response(std::span<const std::uint8_t> payload,

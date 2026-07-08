@@ -25,12 +25,13 @@ returns `status: "exists"`. Creating it with a different partition count returns
 When `BOLTSTREAM_BROKER_TOKEN` is configured on the broker, pass `--token TOKEN` or
 set the same environment variable for the admin CLI.
 
-## Phase 5 Boundaries
+## Current Boundaries
 
 - Topic partition counts are immutable.
 - Producers do not create topics lazily.
-- Consumers choose partitions explicitly.
-- Coordinated membership, automatic assignment, heartbeats, and rebalancing are
-  planned for the coordinated consumer groups phase.
-- Topic deletion, retention, group inspection, and offset reset are planned for
-  the retention and lifecycle phase.
+- One-shot consumers choose partitions explicitly.
+- Coordinated consumers use broker-managed membership, heartbeats, automatic
+  assignment, generation fencing, and rebalancing for one topic per `(group,
+  topic)` coordinator instance.
+- Topic deletion, retention, group inspection, group describe, and offset reset
+  are planned for the retention and lifecycle phase.

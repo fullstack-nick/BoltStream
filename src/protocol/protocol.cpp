@@ -165,6 +165,26 @@ std::string_view frame_type_name(FrameType frame_type) {
     return "create_topic_request";
   case FrameType::CreateTopicResponse:
     return "create_topic_response";
+  case FrameType::JoinGroupRequest:
+    return "join_group_request";
+  case FrameType::JoinGroupResponse:
+    return "join_group_response";
+  case FrameType::SyncGroupRequest:
+    return "sync_group_request";
+  case FrameType::SyncGroupResponse:
+    return "sync_group_response";
+  case FrameType::HeartbeatRequest:
+    return "heartbeat_request";
+  case FrameType::HeartbeatResponse:
+    return "heartbeat_response";
+  case FrameType::LeaveGroupRequest:
+    return "leave_group_request";
+  case FrameType::LeaveGroupResponse:
+    return "leave_group_response";
+  case FrameType::GroupOffsetCommitRequest:
+    return "group_offset_commit_request";
+  case FrameType::GroupOffsetCommitResponse:
+    return "group_offset_commit_response";
   }
   return "unknown";
 }
@@ -203,11 +223,17 @@ std::string_view error_code_name(ErrorCode error_code) {
     return "invalid_offset";
   case ErrorCode::Overloaded:
     return "overloaded";
+  case ErrorCode::RebalanceRequired:
+    return "rebalance_required";
+  case ErrorCode::StaleMember:
+    return "stale_member";
   }
   return "unknown_error";
 }
 
-bool is_retryable_error(ErrorCode error_code) { return error_code == ErrorCode::Overloaded; }
+bool is_retryable_error(ErrorCode error_code) {
+  return error_code == ErrorCode::Overloaded || error_code == ErrorCode::RebalanceRequired;
+}
 
 bool is_request_type(FrameType frame_type) {
   switch (frame_type) {
@@ -218,6 +244,11 @@ bool is_request_type(FrameType frame_type) {
   case FrameType::OffsetCommitRequest:
   case FrameType::AuthRequest:
   case FrameType::CreateTopicRequest:
+  case FrameType::JoinGroupRequest:
+  case FrameType::SyncGroupRequest:
+  case FrameType::HeartbeatRequest:
+  case FrameType::LeaveGroupRequest:
+  case FrameType::GroupOffsetCommitRequest:
     return true;
   default:
     return false;
@@ -296,7 +327,7 @@ HeaderDecodeResult decode_header(std::span<const std::uint8_t> bytes,
   }
   if (result.header.flags != 0) {
     result.error = ErrorCode::ReservedFlags;
-    result.message = "reserved frame flags are not supported in protocol version 2";
+    result.message = "reserved frame flags are not supported in protocol version 3";
     return result;
   }
 
@@ -550,6 +581,298 @@ DecodeResult decode_offset_commit_response(std::span<const std::uint8_t> payload
       !reader.read_u16(response.partition) || !reader.read_u64(response.next_offset) ||
       !reader.done()) {
     return error_result(ErrorCode::MalformedPayload, "malformed offset-commit response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_join_group_request(const JoinGroupRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.group);
+  write_string(out, request.topic);
+  write_string(out, request.member_id);
+  write_u32(out, request.session_timeout_ms);
+  return out;
+}
+
+DecodeResult decode_join_group_request(std::span<const std::uint8_t> payload,
+                                       JoinGroupRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.group) || !reader.read_string(request.topic) ||
+      !reader.read_string(request.member_id) || !reader.read_u32(request.session_timeout_ms) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed join-group request payload");
+  }
+  if (request.group.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "join-group group must not be empty");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "join-group topic must not be empty");
+  }
+  if (request.session_timeout_ms == 0) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "join-group session timeout must be greater than zero");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_join_group_response(const JoinGroupResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.group);
+  write_string(out, response.topic);
+  write_string(out, response.member_id);
+  write_u64(out, response.generation_id);
+  return out;
+}
+
+DecodeResult decode_join_group_response(std::span<const std::uint8_t> payload,
+                                        JoinGroupResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.group) || !reader.read_string(response.topic) ||
+      !reader.read_string(response.member_id) || !reader.read_u64(response.generation_id) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed join-group response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_sync_group_request(const SyncGroupRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.group);
+  write_string(out, request.topic);
+  write_string(out, request.member_id);
+  write_u64(out, request.generation_id);
+  return out;
+}
+
+DecodeResult decode_sync_group_request(std::span<const std::uint8_t> payload,
+                                       SyncGroupRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.group) || !reader.read_string(request.topic) ||
+      !reader.read_string(request.member_id) || !reader.read_u64(request.generation_id) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed sync-group request payload");
+  }
+  if (request.group.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "sync-group group must not be empty");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "sync-group topic must not be empty");
+  }
+  if (request.member_id.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "sync-group member id must not be empty");
+  }
+  if (request.generation_id == 0) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "sync-group generation id must be greater than zero");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_sync_group_response(const SyncGroupResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.group);
+  write_string(out, response.topic);
+  write_string(out, response.member_id);
+  write_u64(out, response.generation_id);
+  write_u32(out, static_cast<std::uint32_t>(response.assignment.size()));
+  for (const auto partition : response.assignment) {
+    write_u16(out, partition);
+  }
+  return out;
+}
+
+DecodeResult decode_sync_group_response(std::span<const std::uint8_t> payload,
+                                        SyncGroupResponse& response) {
+  PayloadReader reader{payload};
+  std::uint32_t assignment_count = 0;
+  if (!reader.read_string(response.group) || !reader.read_string(response.topic) ||
+      !reader.read_string(response.member_id) || !reader.read_u64(response.generation_id) ||
+      !reader.read_u32(assignment_count)) {
+    return error_result(ErrorCode::MalformedPayload, "malformed sync-group response payload");
+  }
+  response.assignment.clear();
+  response.assignment.reserve(assignment_count);
+  for (std::uint32_t index = 0; index < assignment_count; ++index) {
+    std::uint16_t partition = 0;
+    if (!reader.read_u16(partition)) {
+      return error_result(ErrorCode::MalformedPayload, "malformed sync-group response payload");
+    }
+    response.assignment.push_back(partition);
+  }
+  if (!reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed sync-group response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_heartbeat_request(const HeartbeatRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.group);
+  write_string(out, request.topic);
+  write_string(out, request.member_id);
+  write_u64(out, request.generation_id);
+  return out;
+}
+
+DecodeResult decode_heartbeat_request(std::span<const std::uint8_t> payload,
+                                      HeartbeatRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.group) || !reader.read_string(request.topic) ||
+      !reader.read_string(request.member_id) || !reader.read_u64(request.generation_id) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed heartbeat request payload");
+  }
+  if (request.group.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "heartbeat group must not be empty");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "heartbeat topic must not be empty");
+  }
+  if (request.member_id.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "heartbeat member id must not be empty");
+  }
+  if (request.generation_id == 0) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "heartbeat generation id must be greater than zero");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_heartbeat_response(const HeartbeatResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.group);
+  write_string(out, response.topic);
+  write_string(out, response.member_id);
+  write_u64(out, response.generation_id);
+  write_string(out, response.status);
+  return out;
+}
+
+DecodeResult decode_heartbeat_response(std::span<const std::uint8_t> payload,
+                                       HeartbeatResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.group) || !reader.read_string(response.topic) ||
+      !reader.read_string(response.member_id) || !reader.read_u64(response.generation_id) ||
+      !reader.read_string(response.status) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed heartbeat response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_leave_group_request(const LeaveGroupRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.group);
+  write_string(out, request.topic);
+  write_string(out, request.member_id);
+  write_u64(out, request.generation_id);
+  return out;
+}
+
+DecodeResult decode_leave_group_request(std::span<const std::uint8_t> payload,
+                                        LeaveGroupRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.group) || !reader.read_string(request.topic) ||
+      !reader.read_string(request.member_id) || !reader.read_u64(request.generation_id) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed leave-group request payload");
+  }
+  if (request.group.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "leave-group group must not be empty");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "leave-group topic must not be empty");
+  }
+  if (request.member_id.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "leave-group member id must not be empty");
+  }
+  if (request.generation_id == 0) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "leave-group generation id must be greater than zero");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_leave_group_response(const LeaveGroupResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.group);
+  write_string(out, response.topic);
+  write_string(out, response.member_id);
+  write_u64(out, response.generation_id);
+  write_string(out, response.status);
+  return out;
+}
+
+DecodeResult decode_leave_group_response(std::span<const std::uint8_t> payload,
+                                         LeaveGroupResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.group) || !reader.read_string(response.topic) ||
+      !reader.read_string(response.member_id) || !reader.read_u64(response.generation_id) ||
+      !reader.read_string(response.status) || !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed leave-group response payload");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t>
+encode_group_offset_commit_request(const GroupOffsetCommitRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.group);
+  write_string(out, request.topic);
+  write_string(out, request.member_id);
+  write_u64(out, request.generation_id);
+  write_u16(out, request.partition);
+  write_u64(out, request.next_offset);
+  return out;
+}
+
+DecodeResult decode_group_offset_commit_request(std::span<const std::uint8_t> payload,
+                                                GroupOffsetCommitRequest& request) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(request.group) || !reader.read_string(request.topic) ||
+      !reader.read_string(request.member_id) || !reader.read_u64(request.generation_id) ||
+      !reader.read_u16(request.partition) || !reader.read_u64(request.next_offset) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "malformed group-offset-commit request payload");
+  }
+  if (request.group.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "group-offset-commit group must not be empty");
+  }
+  if (request.topic.empty()) {
+    return error_result(ErrorCode::MalformedPayload, "group-offset-commit topic must not be empty");
+  }
+  if (request.member_id.empty()) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "group-offset-commit member id must not be empty");
+  }
+  if (request.generation_id == 0) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "group-offset-commit generation id must be greater than zero");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t>
+encode_group_offset_commit_response(const GroupOffsetCommitResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.group);
+  write_string(out, response.topic);
+  write_string(out, response.member_id);
+  write_u64(out, response.generation_id);
+  write_u16(out, response.partition);
+  write_u64(out, response.next_offset);
+  return out;
+}
+
+DecodeResult decode_group_offset_commit_response(std::span<const std::uint8_t> payload,
+                                                 GroupOffsetCommitResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.group) || !reader.read_string(response.topic) ||
+      !reader.read_string(response.member_id) || !reader.read_u64(response.generation_id) ||
+      !reader.read_u16(response.partition) || !reader.read_u64(response.next_offset) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload,
+                        "malformed group-offset-commit response payload");
   }
   return ok_result();
 }

@@ -1,9 +1,9 @@
 # BoltStream Protocol
 
 BoltStream broker/client traffic uses a custom binary TCP protocol. Protocol version
-`2` validates framed requests, preserves correlation ids, supports explicit topic
+`3` validates framed requests, preserves correlation ids, supports explicit topic
 creation, multi-partition produce/fetch, durable consumer offset commits, long-poll
-fetch, and retryable overload responses.
+fetch, retryable overload responses, and coordinated consumer groups.
 
 ## Frame Header
 
@@ -12,12 +12,12 @@ order.
 
 ```text
 uint32 magic          0x42535452 ("BSTR")
-uint16 version        2
+uint16 version        3
 uint16 frame_type
 uint32 header_bytes   32
 uint32 payload_bytes
 uint64 correlation_id
-uint32 flags          0 in protocol version 2
+uint32 flags          0 in protocol version 3
 uint32 header_crc32   CRC32 over the first 28 header bytes
 ```
 
@@ -43,11 +43,22 @@ The broker enforces `--max-frame-bytes`, defaulting to `1048576`. The limit incl
 | 13 | `AuthResponse` |
 | 14 | `CreateTopicRequest` |
 | 15 | `CreateTopicResponse` |
+| 16 | `JoinGroupRequest` |
+| 17 | `JoinGroupResponse` |
+| 18 | `SyncGroupRequest` |
+| 19 | `SyncGroupResponse` |
+| 20 | `HeartbeatRequest` |
+| 21 | `HeartbeatResponse` |
+| 22 | `LeaveGroupRequest` |
+| 23 | `LeaveGroupResponse` |
+| 24 | `GroupOffsetCommitRequest` |
+| 25 | `GroupOffsetCommitResponse` |
 
 The broker accepts `HealthRequest`, `MetadataRequest`, `CreateTopicRequest`,
-`ProduceRequest`, `FetchRequest`, `OffsetCommitRequest`, and `AuthRequest`. Health
-returns `HealthResponse`. Metadata, create-topic, produce, fetch, commit, and auth
-return success frames when valid.
+`ProduceRequest`, `FetchRequest`, `OffsetCommitRequest`, coordinated group
+requests, and `AuthRequest`. Health returns `HealthResponse`. Metadata,
+create-topic, produce, fetch, commit, group coordination, and auth return success
+frames when valid.
 
 ## Payload Encoding
 
@@ -74,6 +85,16 @@ Payloads:
 - `AuthResponse`: `string status`.
 - `OffsetCommitRequest`: `string group`, `string topic`, `uint16 partition`, `uint64 next_offset`.
 - `OffsetCommitResponse`: `string group`, `string topic`, `uint16 partition`, `uint64 next_offset`.
+- `JoinGroupRequest`: `string group`, `string topic`, `string member_id`, `uint32 session_timeout_ms`; an empty member id asks the broker to assign one.
+- `JoinGroupResponse`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`.
+- `SyncGroupRequest`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`.
+- `SyncGroupResponse`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`, `uint32 assignment_count`, then repeated `uint16 partition`.
+- `HeartbeatRequest`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`.
+- `HeartbeatResponse`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`, `string status`.
+- `LeaveGroupRequest`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`.
+- `LeaveGroupResponse`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`, `string status`.
+- `GroupOffsetCommitRequest`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`, `uint16 partition`, `uint64 next_offset`.
+- `GroupOffsetCommitResponse`: `string group`, `string topic`, `string member_id`, `uint64 generation_id`, `uint16 partition`, `uint64 next_offset`.
 - `ErrorResponse`: `uint32 error_code`, `string message`.
 
 `FetchRequest.from` supports `beginning`, `latest`, `committed`, or an unsigned offset
@@ -82,6 +103,13 @@ when the resolved fetch offset equals the partition high watermark; otherwise th
 returns immediately. `FetchResponse.next_offset` is the resume offset for the next fetch:
 when a response is truncated by record or byte caps, it is one past the final returned
 record. Use metadata for the partition high watermark.
+
+Coordinated consumer groups operate on one topic per `(group, topic)` coordinator
+instance. The broker stores membership in memory, assigns deterministic contiguous
+partition ranges across sorted member ids, increments the generation when membership
+changes, and fences coordinated offset commits by member id, generation id, and
+partition ownership. Legacy `OffsetCommitRequest` is rejected while a coordinated
+group for the same `(group, topic)` has active members.
 
 ## Error Codes
 
@@ -103,6 +131,8 @@ record. Use metadata for the partition high watermark.
 | 14 | `invalid_group` |
 | 15 | `invalid_offset` |
 | 16 | `overloaded` |
+| 17 | `rebalance_required` |
+| 18 | `stale_member` |
 
 Malformed or unsafe frames receive a structured `ErrorResponse` when possible and then
 the broker closes the connection. Valid but unsupported operations keep the connection
@@ -112,9 +142,12 @@ successful `AuthRequest`; unauthorized requests return `unauthorized` and close 
 connection. Create-topic and offset commit are protected by the same auth gate. Health
 remains unauthenticated.
 
-`overloaded` is retryable. The broker returns it when bounded append queues or long-poll
-waiter slots are exhausted. The producer, consumer, and admin CLIs include
-`"retryable": true` in overload error JSON and exit with code `5`.
+`overloaded` and `rebalance_required` are retryable. The broker returns
+`overloaded` when bounded append queues or long-poll waiter slots are exhausted.
+The broker returns `rebalance_required` when a known group member must rejoin after
+a generation change. `stale_member` is non-retryable for stale coordinated commits
+and unknown members. The producer, consumer, and admin CLIs include `"retryable":
+true` in retryable error JSON and exit with code `5`.
 
 ## CLI Behavior
 
@@ -136,11 +169,17 @@ The producer and consumer CLIs use the same C++ async client library as other cl
 .\build\windows-gcc-debug\boltstream-consumer.exe `
   --host 127.0.0.1 --port 9000 `
   --topic trades --partition 0 --group dashboard --commit
+
+.\build\windows-gcc-debug\boltstream-consumer.exe `
+  --host 127.0.0.1 --port 9000 `
+  --topic trades --group dashboard --commit --coordinated
 ```
 
-Both commands return exit code `0` on success and print one structured JSON line. The
-producer includes the assigned offset and next offset. The consumer includes the
-returned records and next offset.
+The producer and one-shot consumer return exit code `0` on success and print one
+structured JSON line. The producer includes the assigned offset and next offset.
+The one-shot consumer includes the returned records and next offset. The
+coordinated consumer prints JSON Lines with `join`, `assignment`, `record`,
+`commit`, `rebalance`, `leave`, and `summary` events.
 
 When the broker requires auth, pass `--token TOKEN` or set `BOLTSTREAM_BROKER_TOKEN`
 before running producer or consumer.

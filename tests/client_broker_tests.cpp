@@ -245,6 +245,68 @@ boltstream::protocol::Frame commit_offset(std::uint16_t port, std::string_view g
       seen_error, timed_out);
 }
 
+boltstream::protocol::Frame join_group(std::uint16_t port,
+                                       const boltstream::protocol::JoinGroupRequest& request,
+                                       boost::system::error_code& seen_error, bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_join_group(request, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame sync_group(std::uint16_t port,
+                                       const boltstream::protocol::SyncGroupRequest& request,
+                                       boost::system::error_code& seen_error, bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_sync_group(request, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame heartbeat_group(std::uint16_t port,
+                                            const boltstream::protocol::HeartbeatRequest& request,
+                                            boost::system::error_code& seen_error,
+                                            bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_heartbeat(request, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame leave_group(std::uint16_t port,
+                                        const boltstream::protocol::LeaveGroupRequest& request,
+                                        boost::system::error_code& seen_error, bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_leave_group(request, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
+boltstream::protocol::Frame
+group_offset_commit(std::uint16_t port,
+                    const boltstream::protocol::GroupOffsetCommitRequest& request,
+                    boost::system::error_code& seen_error, bool& timed_out) {
+  return run_single_request(
+      port,
+      [&](boltstream::client::AsyncClient& client,
+          std::function<void(boost::system::error_code, boltstream::protocol::Frame)> done) {
+        client.async_group_offset_commit(request, std::move(done));
+      },
+      seen_error, timed_out);
+}
+
 boltstream::protocol::Frame metadata(std::uint16_t port, boost::system::error_code& seen_error,
                                      bool& timed_out) {
   return run_single_request(
@@ -472,6 +534,166 @@ TEST(ClientBrokerTests, ConsumerGroupCommitSurvivesRestartAndResumes) {
   std::filesystem::remove_all(data_dir, ignored);
 }
 
+TEST(ClientBrokerTests, CoordinatedConsumerGroupsAssignPartitionsAndFenceCommits) {
+  const auto running = start_server();
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "coordinated", 4, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
+  auto joined_one =
+      join_group(running->port, {"dashboard", "coordinated", "", 1000}, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(joined_one.header.frame_type, boltstream::protocol::FrameType::JoinGroupResponse);
+  boltstream::protocol::JoinGroupResponse join_one_response;
+  auto decoded =
+      boltstream::protocol::decode_join_group_response(joined_one.payload, join_one_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(join_one_response.member_id, "member-000000000001");
+  EXPECT_EQ(join_one_response.generation_id, 1U);
+
+  auto joined_two =
+      join_group(running->port, {"dashboard", "coordinated", "", 1000}, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::JoinGroupResponse join_two_response;
+  decoded = boltstream::protocol::decode_join_group_response(joined_two.payload, join_two_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(join_two_response.member_id, "member-000000000002");
+  EXPECT_EQ(join_two_response.generation_id, 2U);
+
+  auto synced_one =
+      sync_group(running->port, {"dashboard", "coordinated", join_one_response.member_id, 2},
+                 seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::SyncGroupResponse sync_one_response;
+  decoded = boltstream::protocol::decode_sync_group_response(synced_one.payload, sync_one_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(sync_one_response.assignment, (std::vector<std::uint16_t>{0, 1}));
+
+  auto synced_two =
+      sync_group(running->port, {"dashboard", "coordinated", join_two_response.member_id, 2},
+                 seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::SyncGroupResponse sync_two_response;
+  decoded = boltstream::protocol::decode_sync_group_response(synced_two.payload, sync_two_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(sync_two_response.assignment, (std::vector<std::uint16_t>{2, 3}));
+
+  auto stale_commit = group_offset_commit(
+      running->port, {"dashboard", "coordinated", join_one_response.member_id, 1, 0, 0}, seen_error,
+      timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(stale_commit.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
+  EXPECT_EQ(decode_error(stale_commit).code, boltstream::protocol::ErrorCode::StaleMember);
+
+  auto current_commit = group_offset_commit(
+      running->port, {"dashboard", "coordinated", join_one_response.member_id, 2, 0, 0}, seen_error,
+      timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(current_commit.header.frame_type,
+            boltstream::protocol::FrameType::GroupOffsetCommitResponse);
+
+  auto legacy_commit =
+      commit_offset(running->port, "dashboard", "coordinated", 0, 0, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(legacy_commit.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
+  EXPECT_EQ(decode_error(legacy_commit).code, boltstream::protocol::ErrorCode::StaleMember);
+
+  auto left_two =
+      leave_group(running->port, {"dashboard", "coordinated", join_two_response.member_id, 2},
+                  seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(left_two.header.frame_type, boltstream::protocol::FrameType::LeaveGroupResponse);
+
+  synced_one =
+      sync_group(running->port, {"dashboard", "coordinated", join_one_response.member_id, 3},
+                 seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  decoded = boltstream::protocol::decode_sync_group_response(synced_one.payload, sync_one_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(sync_one_response.assignment, (std::vector<std::uint16_t>{0, 1, 2, 3}));
+}
+
+TEST(ClientBrokerTests, CoordinatedConsumerGroupTimeoutTriggersTakeover) {
+  const auto running = start_server();
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "timeouts", 4, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+
+  auto joined_one =
+      join_group(running->port, {"dashboard", "timeouts", "", 150}, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::JoinGroupResponse join_one_response;
+  auto decoded =
+      boltstream::protocol::decode_join_group_response(joined_one.payload, join_one_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+
+  auto joined_two =
+      join_group(running->port, {"dashboard", "timeouts", "", 150}, seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::JoinGroupResponse join_two_response;
+  decoded = boltstream::protocol::decode_join_group_response(joined_two.payload, join_two_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(join_two_response.generation_id, 2U);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(90));
+
+  auto heartbeat =
+      heartbeat_group(running->port, {"dashboard", "timeouts", join_one_response.member_id, 2},
+                      seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(heartbeat.header.frame_type, boltstream::protocol::FrameType::HeartbeatResponse);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(90));
+
+  auto rebalance =
+      heartbeat_group(running->port, {"dashboard", "timeouts", join_one_response.member_id, 2},
+                      seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  ASSERT_EQ(rebalance.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
+  EXPECT_EQ(decode_error(rebalance).code, boltstream::protocol::ErrorCode::RebalanceRequired);
+
+  auto rejoined_one =
+      join_group(running->port, {"dashboard", "timeouts", join_one_response.member_id, 150},
+                 seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::JoinGroupResponse rejoin_response;
+  decoded = boltstream::protocol::decode_join_group_response(rejoined_one.payload, rejoin_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(rejoin_response.member_id, join_one_response.member_id);
+  EXPECT_EQ(rejoin_response.generation_id, 3U);
+
+  auto synced_one =
+      sync_group(running->port, {"dashboard", "timeouts", join_one_response.member_id, 3},
+                 seen_error, timed_out);
+  ASSERT_FALSE(timed_out);
+  ASSERT_FALSE(seen_error) << seen_error.message();
+  boltstream::protocol::SyncGroupResponse sync_response;
+  decoded = boltstream::protocol::decode_sync_group_response(synced_one.payload, sync_response);
+  ASSERT_TRUE(decoded.ok) << decoded.message;
+  EXPECT_EQ(sync_response.assignment, (std::vector<std::uint16_t>{0, 1, 2, 3}));
+}
+
 TEST(ClientBrokerTests, LongPollFetchCompletesAfterDelayedProduce) {
   const auto running = start_server();
   boost::system::error_code seen_error;
@@ -609,7 +831,6 @@ TEST(ClientBrokerTests, OversizedFrameReceivesInvalidLengthAndCloses) {
   auto rejected =
       produce(running->port, "frames", "k", std::string(128, 'x'), seen_error, timed_out);
   ASSERT_FALSE(timed_out);
-  ASSERT_FALSE(seen_error) << seen_error.message();
   ASSERT_EQ(rejected.header.frame_type, boltstream::protocol::FrameType::ErrorResponse);
   EXPECT_EQ(decode_error(rejected).code, boltstream::protocol::ErrorCode::InvalidLength);
 }

@@ -632,6 +632,9 @@ Deliverables:
 - Automatic partition assignment across active group members.
 - Rebalance behavior when members join, leave, crash, or time out.
 - Offset commits fenced by group generation.
+- Locked scope: coordinated groups operate on one topic per `(group, topic)`
+  coordinator instance. Multi-topic subscriptions are intentionally out of the
+  committed roadmap.
 
 Acceptance:
 

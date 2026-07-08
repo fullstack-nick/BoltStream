@@ -84,6 +84,6 @@ jobs:
           $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
           cmd /c "call `"$vcvars`" && cmake --preset windows-msvc-debug && cmake --build --preset build-windows-msvc-debug && ctest --preset test-windows-msvc-debug"
 
-      - name: Phase 6 smoke
+      - name: Phase 7 smoke
         shell: pwsh
-        run: ./scripts/smoke-phase6.ps1 -Preset windows-msvc-debug
+        run: ./scripts/smoke-phase7.ps1 -Preset windows-msvc-debug

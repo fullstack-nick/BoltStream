@@ -106,6 +106,42 @@ public:
                          std::forward<CompletionToken>(token));
   }
 
+  template <typename CompletionToken>
+  auto async_join_group(const protocol::JoinGroupRequest& request, CompletionToken&& token) {
+    return async_request(protocol::FrameType::JoinGroupRequest,
+                         protocol::encode_join_group_request(request),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_sync_group(const protocol::SyncGroupRequest& request, CompletionToken&& token) {
+    return async_request(protocol::FrameType::SyncGroupRequest,
+                         protocol::encode_sync_group_request(request),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_heartbeat(const protocol::HeartbeatRequest& request, CompletionToken&& token) {
+    return async_request(protocol::FrameType::HeartbeatRequest,
+                         protocol::encode_heartbeat_request(request),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_leave_group(const protocol::LeaveGroupRequest& request, CompletionToken&& token) {
+    return async_request(protocol::FrameType::LeaveGroupRequest,
+                         protocol::encode_leave_group_request(request),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_group_offset_commit(const protocol::GroupOffsetCommitRequest& request,
+                                 CompletionToken&& token) {
+    return async_request(protocol::FrameType::GroupOffsetCommitRequest,
+                         protocol::encode_group_offset_commit_request(request),
+                         std::forward<CompletionToken>(token));
+  }
+
   void close();
 
 private:
