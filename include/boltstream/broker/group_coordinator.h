@@ -40,6 +40,13 @@ public:
     bool generation_changed{false};
   };
 
+  struct Snapshot {
+    std::string group;
+    std::string topic;
+    std::uint64_t generation_id{0};
+    std::size_t active_member_count{0};
+  };
+
   Result join(std::string_view group, std::string_view topic, std::string_view member_id,
               std::uint32_t session_timeout_ms, std::uint16_t partition_count,
               TimePoint now = Clock::now());
@@ -59,6 +66,7 @@ public:
                                   TimePoint now = Clock::now());
   bool topic_has_active_members(std::string_view topic, TimePoint now = Clock::now());
   void remove_topic(std::string_view topic);
+  [[nodiscard]] std::vector<Snapshot> snapshots(TimePoint now = Clock::now()) const;
 
 private:
   struct GroupKey {
@@ -95,7 +103,7 @@ private:
   static bool owns_partition(const MemberState& member, std::uint16_t partition);
   [[nodiscard]] std::string next_member_id();
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::map<GroupKey, GroupState> groups_;
   std::uint64_t next_member_id_{1};
 };

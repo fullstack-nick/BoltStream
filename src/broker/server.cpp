@@ -1,6 +1,7 @@
 #include "boltstream/broker/server.h"
 
 #include "boltstream/broker/group_coordinator.h"
+#include "boltstream/observability/logger.h"
 #include "boltstream/protocol/protocol.h"
 #include "boltstream/storage/offset_store.h"
 #include "boltstream/storage/partition_log.h"
@@ -36,6 +37,9 @@
 
 namespace boltstream::broker {
 
+using observability::StructuredLogFields;
+using observability::write_structured_log;
+
 namespace {
 
 struct TopicManifest {
@@ -63,119 +67,6 @@ std::filesystem::path topic_directory(const std::filesystem::path& data_dir,
 std::filesystem::path topic_manifest_path(const std::filesystem::path& data_dir,
                                           std::string_view topic) {
   return topic_directory(data_dir, topic) / "manifest.json";
-}
-
-std::string json_escape(std::string_view value) {
-  std::ostringstream out;
-  for (const char ch : value) {
-    switch (ch) {
-    case '\\':
-      out << "\\\\";
-      break;
-    case '"':
-      out << "\\\"";
-      break;
-    case '\n':
-      out << "\\n";
-      break;
-    case '\r':
-      out << "\\r";
-      break;
-    case '\t':
-      out << "\\t";
-      break;
-    default:
-      out << ch;
-      break;
-    }
-  }
-  return out.str();
-}
-
-struct StructuredLogFields {
-  StructuredLogFields(std::string level_in, std::string event_in, std::string remote_in = {},
-                      std::string frame_type_in = {}, std::string error_code_in = {},
-                      std::string message_in = {},
-                      std::optional<std::uint64_t> correlation_id_in = std::nullopt,
-                      std::optional<std::uint32_t> payload_bytes_in = std::nullopt,
-                      std::optional<bool> retryable_in = std::nullopt,
-                      std::optional<std::uint32_t> append_queue_depth_in = std::nullopt,
-                      std::optional<std::uint32_t> waiter_count_in = std::nullopt,
-                      std::optional<std::uint64_t> request_duration_ms_in = std::nullopt)
-      : level(std::move(level_in)), event(std::move(event_in)), remote(std::move(remote_in)),
-        frame_type(std::move(frame_type_in)), error_code(std::move(error_code_in)),
-        message(std::move(message_in)), correlation_id(correlation_id_in),
-        payload_bytes(payload_bytes_in), retryable(retryable_in),
-        append_queue_depth(append_queue_depth_in), waiter_count(waiter_count_in),
-        request_duration_ms(request_duration_ms_in) {}
-
-  std::string level{"info"};
-  std::string event;
-  std::string remote;
-  std::string frame_type;
-  std::string error_code;
-  std::string message;
-  std::optional<std::uint64_t> correlation_id;
-  std::optional<std::uint32_t> payload_bytes;
-  std::optional<bool> retryable;
-  std::optional<std::uint32_t> append_queue_depth;
-  std::optional<std::uint32_t> waiter_count;
-  std::optional<std::uint64_t> request_duration_ms;
-  std::map<std::string, std::string> string_fields;
-  std::map<std::string, std::uint64_t> numeric_fields;
-};
-
-std::mutex& structured_log_mutex() {
-  static std::mutex mutex;
-  return mutex;
-}
-
-void write_structured_log(const StructuredLogFields& fields) {
-  std::ostringstream out;
-  out << "{";
-  out << "\"timestamp\":\"" << utc_now_iso8601() << "\"";
-  out << ",\"level\":\"" << json_escape(fields.level) << "\"";
-  out << ",\"event\":\"" << json_escape(fields.event) << "\"";
-  if (!fields.remote.empty()) {
-    out << ",\"remote\":\"" << json_escape(fields.remote) << "\"";
-  }
-  if (fields.correlation_id) {
-    out << ",\"correlation_id\":" << *fields.correlation_id;
-  }
-  if (!fields.frame_type.empty()) {
-    out << ",\"frame_type\":\"" << json_escape(fields.frame_type) << "\"";
-  }
-  if (fields.payload_bytes) {
-    out << ",\"payload_bytes\":" << *fields.payload_bytes;
-  }
-  if (!fields.error_code.empty()) {
-    out << ",\"error_code\":\"" << json_escape(fields.error_code) << "\"";
-  }
-  if (fields.retryable) {
-    out << ",\"retryable\":" << (*fields.retryable ? "true" : "false");
-  }
-  if (fields.append_queue_depth) {
-    out << ",\"append_queue_depth\":" << *fields.append_queue_depth;
-  }
-  if (fields.waiter_count) {
-    out << ",\"waiter_count\":" << *fields.waiter_count;
-  }
-  if (fields.request_duration_ms) {
-    out << ",\"request_duration_ms\":" << *fields.request_duration_ms;
-  }
-  for (const auto& [key, value] : fields.string_fields) {
-    out << ",\"" << json_escape(key) << "\":\"" << json_escape(value) << "\"";
-  }
-  for (const auto& [key, value] : fields.numeric_fields) {
-    out << ",\"" << json_escape(key) << "\":" << value;
-  }
-  if (!fields.message.empty()) {
-    out << ",\"message\":\"" << json_escape(fields.message) << "\"";
-  }
-  out << "}\n";
-
-  std::lock_guard lock{structured_log_mutex()};
-  std::cerr << out.str();
 }
 
 std::string endpoint_string(const boost::asio::ip::tcp::endpoint& endpoint) {
@@ -287,9 +178,10 @@ void write_topic_manifest(const std::filesystem::path& data_dir, const TopicMani
   }
   out << "{\n";
   out << "  \"manifest_version\": 1,\n";
-  out << "  \"topic\": \"" << json_escape(manifest.topic) << "\",\n";
+  out << "  \"topic\": \"" << observability::json_escape(manifest.topic) << "\",\n";
   out << "  \"partition_count\": " << manifest.partition_count << ",\n";
-  out << "  \"created_at_utc\": \"" << json_escape(manifest.created_at_utc) << "\"\n";
+  out << "  \"created_at_utc\": \"" << observability::json_escape(manifest.created_at_utc)
+      << "\"\n";
   out << "}\n";
   out.flush();
   if (!out) {
@@ -357,7 +249,8 @@ public:
 
   using ProduceCompletion = std::function<void(ProduceResult)>;
 
-  explicit BrokerRuntime(ServerOptions options, std::string broker_token)
+  explicit BrokerRuntime(ServerOptions options, std::string broker_token,
+                         observability::MetricsRegistry& metrics)
       : data_dir_(std::move(options.data_dir)), max_frame_bytes_(options.max_frame_bytes),
         max_fetch_records_(options.max_fetch_records), max_fetch_bytes_(options.max_fetch_bytes),
         max_topic_partitions_(options.max_topic_partitions),
@@ -368,7 +261,7 @@ public:
         segment_bytes_(options.segment_bytes),
         segment_max_age_seconds_(options.segment_max_age_seconds),
         retention_policy_{options.retention_max_age_seconds, options.retention_max_bytes},
-        broker_token_(std::move(broker_token)),
+        broker_token_(std::move(broker_token)), metrics_(metrics),
         offset_store_(storage::OffsetStore::open(data_dir_)) {
     start_append_workers();
   }
@@ -421,6 +314,85 @@ public:
     return !auth_required() || token == broker_token_;
   }
 
+  [[nodiscard]] observability::RuntimeMetricsSnapshot runtime_metrics() const {
+    observability::RuntimeMetricsSnapshot snapshot;
+    std::vector<std::shared_ptr<TopicState>> topics;
+    {
+      std::lock_guard lock{topics_mutex_};
+      topics.reserve(topics_.size());
+      for (const auto& [_, topic] : topics_) {
+        topics.push_back(topic);
+      }
+    }
+
+    std::map<std::pair<std::string, std::uint16_t>, std::pair<std::uint64_t, std::uint64_t>>
+        watermarks;
+    for (const auto& topic : topics) {
+      std::lock_guard topic_lock{topic->mutex};
+      if (topic->deleting) {
+        continue;
+      }
+      ++snapshot.topic_count;
+      for (const auto& partition : topic->partitions) {
+        observability::PartitionMetrics current;
+        current.topic = topic->name;
+        current.append_queue_capacity = max_append_queue_depth_;
+        {
+          std::lock_guard append_lock{partition->append_mutex};
+          current.append_queue_depth =
+              partition->pending_appends.size() + (partition->append_active ? 1U : 0U);
+        }
+        {
+          std::lock_guard log_lock{partition->log_mutex};
+          current.partition = partition->log.options().partition_id;
+          current.earliest_offset = partition->log.earliest_offset();
+          current.next_offset = partition->log.next_offset();
+          const auto segments = partition->log.segment_summaries();
+          current.segments = segments.size();
+          for (const auto& segment : segments) {
+            current.log_bytes += segment.log_bytes;
+          }
+        }
+        watermarks[{current.topic, current.partition}] = {current.earliest_offset,
+                                                          current.next_offset};
+        snapshot.partitions.push_back(std::move(current));
+        ++snapshot.partition_count;
+      }
+    }
+
+    const auto groups = group_coordinator_.snapshots();
+    snapshot.groups.reserve(groups.size());
+    for (const auto& group : groups) {
+      snapshot.groups.push_back(
+          {group.group, group.topic, group.active_member_count, group.generation_id});
+    }
+    std::vector<storage::OffsetSnapshot> offsets;
+    {
+      std::lock_guard offset_lock{offsets_mutex_};
+      offsets = offset_store_.all_offsets();
+    }
+    snapshot.lags.reserve(offsets.size());
+    for (const auto& offset : offsets) {
+      const auto watermark = watermarks.find({offset.topic, offset.partition});
+      if (watermark == watermarks.end()) {
+        continue;
+      }
+      const auto [earliest, next] = watermark->second;
+      const auto out_of_range = offset.next_offset < earliest || offset.next_offset > next;
+      const auto baseline = out_of_range ? earliest : offset.next_offset;
+      const auto lag = baseline <= next ? next - baseline : 0;
+      snapshot.lags.push_back({offset.group, offset.topic, offset.partition, lag, out_of_range});
+    }
+    snapshot.long_poll_waiters = active_long_poll_waiters();
+    std::error_code ec;
+    const auto space = std::filesystem::space(data_dir_, ec);
+    if (!ec) {
+      snapshot.storage_capacity_bytes = space.capacity;
+      snapshot.storage_available_bytes = space.available;
+    }
+    return snapshot;
+  }
+
   protocol::CreateTopicResponse create_topic(const protocol::CreateTopicRequest& request) {
     if (!storage::is_valid_topic_name(request.topic)) {
       throw BrokerRequestError{protocol::ErrorCode::MalformedPayload, "invalid topic name"};
@@ -464,6 +436,8 @@ public:
     auto partition = topic->partitions.at(partition_id);
     const auto enqueued = try_enqueue_append(partition, job);
     if (!enqueued.accepted) {
+      metrics_.record_rejection(protocol::FrameType::ProduceRequest,
+                                observability::RejectionReason::AppendQueue);
       write_structured_log({"warn",
                             "append_overloaded",
                             {},
@@ -790,6 +764,7 @@ public:
            std::nullopt,
            active_long_poll_waiters()});
     }
+    metrics_.record_retention_run(response.segments_deleted, response.bytes_deleted);
     return response;
   }
 
@@ -1131,31 +1106,32 @@ private:
   ProduceResult run_append(const std::shared_ptr<TopicState::PartitionState>& partition,
                            const AppendJob& job) {
     ProduceResult result;
+    bool append_completed = false;
     try {
       std::lock_guard log_lock{partition->log_mutex};
       const auto metadata = partition->log.append(job.request.key, job.request.message);
+      append_completed = true;
       result.ok = true;
       result.response.topic = metadata.topic;
       result.response.partition = metadata.partition;
       result.response.offset = metadata.offset;
       result.response.next_offset = partition->log.next_offset();
       result.response.encoded_byte_size = metadata.encoded_byte_size;
+      metrics_.record_records_produced(1);
       const auto retention = partition->log.apply_retention(retention_policy_);
+      metrics_.record_retention_run(retention.segments_deleted, retention.bytes_deleted);
       if (retention.segments_deleted > 0) {
-        write_structured_log({"info",
-                              "retention_applied",
-                              {},
-                              {},
-                              {},
-                              "segments_deleted=" + std::to_string(retention.segments_deleted) +
-                                  " bytes_deleted=" + std::to_string(retention.bytes_deleted),
-                              std::nullopt,
-                              std::nullopt,
-                              std::nullopt,
-                              std::nullopt,
-                              active_long_poll_waiters()});
+        StructuredLogFields fields{"info", "retention_applied"};
+        fields.component = "storage";
+        fields.numeric_fields["segments_deleted"] = retention.segments_deleted;
+        fields.numeric_fields["bytes_deleted"] = retention.bytes_deleted;
+        fields.numeric_fields["waiter_count"] = active_long_poll_waiters();
+        write_structured_log(fields);
       }
     } catch (const std::exception& error) {
+      if (append_completed) {
+        metrics_.record_retention_failure();
+      }
       result.ok = false;
       result.error = protocol::ErrorCode::InternalError;
       result.message = error.what();
@@ -1415,6 +1391,9 @@ private:
   }
 
   void log_group_result(std::string event, const GroupCoordinator::Result& result) {
+    if (event == "group_rebalanced") {
+      metrics_.record_group_rebalance();
+    }
     write_structured_log(group_log_fields(std::move(event), result));
   }
 
@@ -1454,6 +1433,7 @@ private:
   std::uint64_t segment_max_age_seconds_;
   storage::RetentionPolicy retention_policy_;
   std::string broker_token_;
+  observability::MetricsRegistry& metrics_;
   mutable std::mutex topics_mutex_;
   std::map<std::string, std::shared_ptr<TopicState>> topics_;
   mutable std::mutex offsets_mutex_;
@@ -1472,8 +1452,17 @@ private:
 
 namespace {
 
-std::string normalize_request_path(std::string_view request) {
+struct AdminRequest {
+  bool valid{false};
+  std::string method;
+  std::string path;
+};
+
+AdminRequest parse_admin_request(std::string_view request) {
   const auto line_end = request.find("\r\n");
+  if (line_end == std::string_view::npos) {
+    return {};
+  }
   const auto line = request.substr(0, line_end);
   const auto first_space = line.find(' ');
   if (first_space == std::string_view::npos) {
@@ -1483,7 +1472,21 @@ std::string normalize_request_path(std::string_view request) {
   if (second_space == std::string_view::npos) {
     return {};
   }
-  return std::string{line.substr(first_space + 1, second_space - first_space - 1)};
+  const auto version = line.substr(second_space + 1);
+  if (version != "HTTP/1.0" && version != "HTTP/1.1") {
+    return {};
+  }
+  AdminRequest parsed;
+  parsed.valid = true;
+  parsed.method = std::string{line.substr(0, first_space)};
+  parsed.path = std::string{line.substr(first_space + 1, second_space - first_space - 1)};
+  if (const auto query = parsed.path.find('?'); query != std::string::npos) {
+    parsed.path.resize(query);
+  }
+  if (parsed.method.empty() || parsed.path.empty() || parsed.path.front() != '/') {
+    return {};
+  }
+  return parsed;
 }
 
 std::string broker_token_from_environment() {
@@ -1506,9 +1509,10 @@ class BrokerProtocolSession : public std::enable_shared_from_this<BrokerProtocol
 public:
   using Tcp = boost::asio::ip::tcp;
 
-  BrokerProtocolSession(Tcp::socket socket, BrokerRuntime& runtime, std::function<bool()> ready,
+  BrokerProtocolSession(Tcp::socket socket, BrokerRuntime& runtime,
+                        observability::MetricsRegistry& metrics, std::function<bool()> ready,
                         std::function<std::string()> ready_detail, std::function<void()> on_close)
-      : socket_(std::move(socket)), runtime_(runtime), ready_(std::move(ready)),
+      : socket_(std::move(socket)), runtime_(runtime), metrics_(metrics), ready_(std::move(ready)),
         ready_detail_(std::move(ready_detail)), on_close_(std::move(on_close)),
         authenticated_(!runtime_.auth_required()) {
     boost::system::error_code ec;
@@ -1568,6 +1572,8 @@ private:
   void handle_frame(protocol::Frame frame) {
     request_started_ = std::chrono::steady_clock::now();
     request_frame_type_ = frame.header.frame_type;
+    metrics_.record_request(frame.header.frame_type,
+                            protocol::kFrameHeaderBytes + frame.header.payload_bytes);
     write_structured_log({"info",
                           "protocol_request",
                           remote_endpoint_,
@@ -1843,6 +1849,8 @@ private:
           });
         });
     if (!waiter_id) {
+      metrics_.record_rejection(protocol::FrameType::FetchRequest,
+                                observability::RejectionReason::LongPollLimit);
       write_structured_log(
           {"warn", "long_poll_overloaded", remote_endpoint_,
            std::string{protocol::frame_type_name(protocol::FrameType::FetchRequest)},
@@ -1887,6 +1895,7 @@ private:
       return;
     }
 
+    metrics_.record_records_fetched(response.records.size());
     write_frame(protocol::FrameType::FetchResponse, correlation_id, payload, false);
   }
 
@@ -2199,6 +2208,7 @@ private:
     } catch (const BrokerRequestError& error) {
       write_error(frame.header.correlation_id, error.code(), error.what(), false);
     } catch (const std::exception& error) {
+      metrics_.record_retention_failure();
       write_error(frame.header.correlation_id, protocol::ErrorCode::InternalError, error.what(),
                   false);
     }
@@ -2283,12 +2293,13 @@ private:
 
   void write_error(std::uint64_t correlation_id, protocol::ErrorCode code, std::string_view message,
                    bool close_after_write) {
+    metrics_.record_error(request_frame_type_, code);
     write_structured_log({"warn", "protocol_error", remote_endpoint_,
                           std::string{protocol::frame_type_name(request_frame_type_)},
                           std::string{protocol::error_code_name(code)}, std::string{message},
                           correlation_id, std::nullopt, protocol::is_retryable_error(code),
                           std::nullopt, runtime_.active_long_poll_waiters(),
-                          request_duration_ms()});
+                          request_duration_us()});
     auto payload = protocol::encode_error_response(code, message);
     if (runtime_.max_frame_bytes() > protocol::kFrameHeaderBytes &&
         payload.size() > runtime_.max_frame_bytes() - protocol::kFrameHeaderBytes) {
@@ -2311,12 +2322,13 @@ private:
                             std::nullopt,
                             std::nullopt,
                             runtime_.active_long_poll_waiters(),
-                            request_duration_ms()});
+                            request_duration_us()});
     }
 
     auto self = shared_from_this();
     auto bytes = std::make_shared<std::vector<std::uint8_t>>(
         protocol::encode_frame(frame_type, correlation_id, payload));
+    metrics_.record_response(request_frame_type_, bytes->size(), request_duration_seconds());
     boost::asio::async_write(
         socket_, boost::asio::buffer(*bytes),
         [this, self, bytes, close_after_write](const boost::system::error_code& ec, std::size_t) {
@@ -2334,13 +2346,21 @@ private:
         });
   }
 
-  [[nodiscard]] std::optional<std::uint64_t> request_duration_ms() const {
+  [[nodiscard]] std::optional<std::uint64_t> request_duration_us() const {
     if (request_started_ == std::chrono::steady_clock::time_point{}) {
       return std::nullopt;
     }
-    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                           std::chrono::steady_clock::now() - request_started_)
                                           .count());
+  }
+
+  [[nodiscard]] double request_duration_seconds() const {
+    if (request_started_ == std::chrono::steady_clock::time_point{}) {
+      return 0.0;
+    }
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - request_started_)
+        .count();
   }
 
   void cancel_active_waiter() {
@@ -2353,6 +2373,7 @@ private:
 
   Tcp::socket socket_;
   BrokerRuntime& runtime_;
+  observability::MetricsRegistry& metrics_;
   std::function<bool()> ready_;
   std::function<std::string()> ready_detail_;
   std::function<void()> on_close_;
@@ -2385,9 +2406,14 @@ std::string utc_now_iso8601() {
 
 BrokerServer::BrokerServer(ServerOptions options, BuildInfo build_info)
     : options_(std::move(options)), build_info_(std::move(build_info)),
-      startup_time_utc_(utc_now_iso8601()), broker_acceptor_(io_), admin_acceptor_(io_),
-      retention_timer_(io_),
-      runtime_(std::make_unique<BrokerRuntime>(options_, broker_token_from_environment())) {}
+      startup_time_utc_(utc_now_iso8601()), startup_monotonic_(std::chrono::steady_clock::now()),
+      broker_acceptor_(io_), admin_acceptor_(io_), retention_timer_(io_),
+      metrics_(options_.metrics_enabled),
+      runtime_(
+          std::make_unique<BrokerRuntime>(options_, broker_token_from_environment(), metrics_)) {
+  observability::configure_logging(observability::parse_log_level(options_.log_level),
+                                   build_info_.git_sha);
+}
 
 BrokerServer::~BrokerServer() { stop(); }
 
@@ -2409,25 +2435,20 @@ void BrokerServer::start() {
   accept_admin_client();
   schedule_retention();
 
-  write_structured_log({"info",
-                        "server_listening",
-                        {},
-                        {},
-                        {},
-                        "broker=" + endpoint_to_string(options_.listen) +
-                            " admin=" + endpoint_to_string(options_.admin_listen) +
-                            " data=" + options_.data_dir.string(),
-                        std::nullopt,
-                        std::nullopt,
-                        std::nullopt,
-                        std::nullopt,
-                        runtime_->active_long_poll_waiters()});
+  StructuredLogFields listening{"info", "server_listening"};
+  listening.string_fields["broker_listen"] = endpoint_to_string(options_.listen);
+  listening.string_fields["admin_listen"] = endpoint_to_string(options_.admin_listen);
+  listening.string_fields["data_dir"] = options_.data_dir.string();
+  listening.numeric_fields["waiter_count"] = runtime_->active_long_poll_waiters();
+  write_structured_log(listening);
 }
 
 void BrokerServer::stop() {
   if (stopping_.exchange(true)) {
     return;
   }
+  ready_ = false;
+  ready_detail_ = "shutting down";
   boost::system::error_code ignored;
   broker_acceptor_.close(ignored);
   admin_acceptor_.close(ignored);
@@ -2458,6 +2479,17 @@ void BrokerServer::wait_for_shutdown_signal() {
 
 std::string BrokerServer::version_json() const {
   return build_info_json(build_info_, startup_time_utc_);
+}
+
+std::string BrokerServer::metrics_text() const {
+  auto snapshot = runtime_->runtime_metrics();
+  snapshot.build_info = build_info_;
+  snapshot.registry = metrics_.snapshot();
+  snapshot.uptime_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - startup_monotonic_).count();
+  snapshot.ready = ready_ && !stopping_;
+  snapshot.connections_active = active_broker_sessions_.load();
+  return observability::render_prometheus(snapshot);
 }
 
 std::uint16_t BrokerServer::broker_port() const {
@@ -2493,28 +2525,24 @@ void BrokerServer::prepare_data_directory() {
   }
   std::filesystem::remove(probe, ec);
 
+  const auto recovery_started = std::chrono::steady_clock::now();
   try {
     const auto summary = runtime_->load_existing_topics();
     const auto retention = runtime_->run_retention({});
-    write_structured_log(
-        {"info",
-         "storage_recovery",
-         {},
-         {},
-         {},
-         "topics=" + std::to_string(summary.topics_recovered) +
-             " partitions=" + std::to_string(summary.partitions_recovered) +
-             " segments=" + std::to_string(summary.segments_scanned) +
-             " indexes_rebuilt=" + std::to_string(summary.indexes_rebuilt) +
-             " records=" + std::to_string(summary.records_recovered) +
-             " bytes_truncated=" + std::to_string(summary.bytes_truncated) +
-             " retention_segments_deleted=" + std::to_string(retention.segments_deleted) +
-             " retention_bytes_deleted=" + std::to_string(retention.bytes_deleted),
-         std::nullopt,
-         std::nullopt,
-         std::nullopt,
-         std::nullopt,
-         runtime_->active_long_poll_waiters()});
+    metrics_.set_recovery(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - recovery_started).count(),
+        summary.records_recovered, summary.bytes_truncated);
+    StructuredLogFields recovery{"info", "storage_recovery"};
+    recovery.component = "storage";
+    recovery.numeric_fields["topics"] = summary.topics_recovered;
+    recovery.numeric_fields["partitions"] = summary.partitions_recovered;
+    recovery.numeric_fields["segments"] = summary.segments_scanned;
+    recovery.numeric_fields["indexes_rebuilt"] = summary.indexes_rebuilt;
+    recovery.numeric_fields["records"] = summary.records_recovered;
+    recovery.numeric_fields["bytes_truncated"] = summary.bytes_truncated;
+    recovery.numeric_fields["retention_segments_deleted"] = retention.segments_deleted;
+    recovery.numeric_fields["retention_bytes_deleted"] = retention.bytes_deleted;
+    write_structured_log(recovery);
   } catch (const std::exception& error) {
     ready_ = false;
     ready_detail_ = "storage recovery failed: " + std::string{error.what()};
@@ -2537,6 +2565,7 @@ void BrokerServer::schedule_retention() {
     try {
       (void)runtime_->run_retention({});
     } catch (const std::exception& error) {
+      metrics_.record_retention_failure();
       write_structured_log(
           {"error",
            "retention_failed",
@@ -2609,6 +2638,7 @@ void BrokerServer::accept_admin_client() {
 void BrokerServer::handle_broker_client(Tcp::socket socket) {
   const auto active = active_broker_sessions_.load();
   if (active >= options_.max_broker_connections) {
+    metrics_.record_connection_rejected();
     boost::system::error_code remote_ec;
     const auto remote = socket.remote_endpoint(remote_ec);
     write_structured_log({"warn",
@@ -2629,34 +2659,59 @@ void BrokerServer::handle_broker_client(Tcp::socket socket) {
   }
 
   active_broker_sessions_.fetch_add(1);
+  metrics_.record_connection_accepted();
   std::make_shared<BrokerProtocolSession>(
-      std::move(socket), *runtime_, [this] { return ready(); }, [this] { return ready_detail_; },
-      [this] { active_broker_sessions_.fetch_sub(1); })
+      std::move(socket), *runtime_, metrics_, [this] { return ready(); },
+      [this] { return ready_detail_; }, [this] { active_broker_sessions_.fetch_sub(1); })
       ->start();
 }
 
 void BrokerServer::handle_admin_client(Tcp::socket socket) {
   auto client = std::make_shared<Tcp::socket>(std::move(socket));
-  auto buffer = std::make_shared<std::array<char, 2048>>();
-  client->async_read_some(
-      boost::asio::buffer(*buffer),
-      [this, client, buffer](const boost::system::error_code& ec, std::size_t read) {
-        if (ec && ec != boost::asio::error::eof) {
-          return;
-        }
-
-        const auto request = std::string_view{buffer->data(), read};
-        const auto path = normalize_request_path(request);
+  auto request_data = std::make_shared<std::string>();
+  boost::asio::async_read_until(
+      *client, boost::asio::dynamic_buffer(*request_data, 2048), "\r\n\r\n",
+      [this, client, request_data](const boost::system::error_code& ec, std::size_t read) {
+        const auto request =
+            ec ? AdminRequest{}
+               : parse_admin_request(std::string_view{*request_data}.substr(0, read));
         auto response = std::make_shared<std::string>();
 
-        if (path == "/health/live") {
+        if (!request.valid) {
+          *response = http_response("400 Bad Request", "application/json",
+                                    "{\"status\":\"bad_request\",\"service\":\"boltstream\"}");
+        } else if (request.method != "GET") {
+          *response = http_response(
+              "405 Method Not Allowed", "application/json",
+              "{\"status\":\"method_not_allowed\",\"service\":\"boltstream\"}", "Allow: GET\r\n");
+        } else if (request.path == "/health/live") {
           *response = http_response("200 OK", "application/json", health_json("live"));
-        } else if (path == "/health/ready") {
+        } else if (request.path == "/health/ready") {
           *response =
               http_response(ready_ ? "200 OK" : "503 Service Unavailable", "application/json",
                             health_json(ready_ ? "ready" : "not_ready"));
-        } else if (path == "/version") {
+        } else if (request.path == "/version") {
           *response = http_response("200 OK", "application/json", version_json());
+        } else if (request.path == "/metrics" && options_.metrics_enabled) {
+          const auto started = std::chrono::steady_clock::now();
+          metrics_.record_metrics_scrape();
+          try {
+            const auto body = metrics_text();
+            metrics_.record_metrics_render_duration(
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+            *response =
+                http_response("200 OK", "text/plain; version=0.0.4; charset=utf-8", body,
+                              "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n");
+          } catch (const std::exception& error) {
+            metrics_.record_metrics_render_failure();
+            observability::StructuredLogFields fields{"error", "metrics_render_failed"};
+            fields.component = "metrics";
+            fields.message = error.what();
+            write_structured_log(fields);
+            *response =
+                http_response("500 Internal Server Error", "application/json",
+                              "{\"status\":\"metrics_render_failed\",\"service\":\"boltstream\"}");
+          }
         } else {
           *response = http_response("404 Not Found", "application/json",
                                     "{\"status\":\"not_found\",\"service\":\"boltstream\"}");
@@ -2691,12 +2746,14 @@ std::string BrokerServer::health_json(std::string_view status) const {
 }
 
 std::string BrokerServer::http_response(std::string_view status, std::string_view content_type,
-                                        std::string_view body) const {
+                                        std::string_view body,
+                                        std::string_view extra_headers) const {
   std::ostringstream out;
   out << "HTTP/1.1 " << status << "\r\n";
   out << "Content-Type: " << content_type << "\r\n";
   out << "Content-Length: " << body.size() << "\r\n";
   out << "Connection: close\r\n";
+  out << extra_headers;
   out << "\r\n";
   out << body;
   return out.str();

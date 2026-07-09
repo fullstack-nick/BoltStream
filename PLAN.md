@@ -673,18 +673,427 @@ Acceptance:
 
 ### Phase 9: Metrics and Operations
 
-Deliverables:
+Phase goal: turn the Phase 8 broker into an observable and operable service without
+changing the binary client protocol or moving the data plane onto a managed service.
+Phase 9 reuses the existing localhost admin listener and structured JSON log stream,
+then gives them stable contracts, configuration, dashboards, alerts, runbooks, and a
+live GCP proof path.
 
-- Prometheus-compatible metrics endpoint.
-- Health endpoint.
-- Broker runtime configuration file.
-- Operational logging.
-- Docker compose demo with broker, producer, consumer, and metrics scraping path.
+#### Locked Phase 9 Boundary
 
-Acceptance:
+- The existing admin HTTP listener remains the only HTTP server. It serves
+  `/health/live`, `/health/ready`, `/version`, and the new `/metrics` endpoint.
+- Prometheus text exposition is implemented directly in BoltStream. Do not add a
+  second HTTP framework or the `prometheus-cpp` dependency for this bounded metric
+  set.
+- YAML parsing uses `yaml-cpp` release `0.9.0`, pinned by immutable tag and source
+  hash through CMake `FetchContent`.
+- Prometheus `3.13.0` LTS and Grafana `13.1.0` are pinned for the operator-side
+  Docker Compose stack. Their image digests are recorded when implementation starts.
+- Prometheus and Grafana run on the operator machine for the local demo and for live
+  inspection through an SSH tunnel. They do not become resident services on the
+  free-tier `e2-micro` VM.
+- The GCP admin listener remains bound to `127.0.0.1:9100`. Phase 9 does not add a
+  public metrics firewall rule or public unauthenticated operations surface.
+- Metrics are in-memory operational state. Counters reset when the broker restarts;
+  Prometheus handles rates and reset detection.
+- Phase 9 does not implement benchmark result publication, compression, replication,
+  OpenTelemetry tracing, log aggregation, or Alertmanager notification delivery.
+  Those boundaries preserve Phases 10 through 12 and keep the VM inside its cost and
+  resource envelope.
 
-- Metrics expose traffic, latency, storage, queue, and error state.
-- A local operator can diagnose throughput, slow consumers, and disk growth from metrics and logs.
+#### Deliverables
+
+- Concurrency-safe counters, gauges, and fixed-bucket histograms owned by a dedicated
+  `boltstream::observability` module.
+- `GET /metrics` on the existing admin listener, rendered as Prometheus text format
+  `0.0.4` with deterministic `HELP` and `TYPE` lines, escaped label values, base
+  units, cumulative histogram buckets, no sample timestamps, and a trailing newline.
+- Stable health contracts for `/health/live` and `/health/ready`, with explicit HTTP
+  status behavior and readiness state reflected in metrics.
+- Strict YAML runtime configuration with `--config`, `--check-config`, and
+  `--print-effective-config`, while preserving existing CLI flags as overrides.
+- Centralized JSON Lines operational logging with level filtering, stable field
+  names, correlation ids, event names, request durations, and secret/payload
+  redaction.
+- Runtime snapshots for current topic, partition, consumer group, queue, retention,
+  recovery, and filesystem state without blocking the broker hot path for the full
+  duration of an HTTP scrape.
+- Docker Compose demo containing BoltStream, topic initialization, producer,
+  consumer, Prometheus, and Grafana, with loopback-only host port publishing and
+  persistent local Prometheus/Grafana data volumes.
+- Checked-in Prometheus scrape configuration, alert rules, Grafana provisioning, and
+  one BoltStream operations dashboard.
+- Operator commands and runbooks for throughput, latency, overload, slow consumers,
+  disk growth, retention failures, recovery, safe restart, configuration validation,
+  and live GCP inspection.
+- `scripts/smoke-phase9.ps1`, a live metrics tunnel helper, Phase 9 additions to the
+  existing GCP deploy/smoke/inspect scripts, and durable `proof/phase-9.md` evidence.
+
+#### Metrics Architecture
+
+- Add `include/boltstream/observability/metrics.h` and
+  `src/observability/metrics.cpp` with three explicit responsibilities:
+  - `MetricsRegistry` owns monotonic process-lifetime counters and fixed-bucket
+    histograms. Hot-path metric labels are closed enums such as operation and error
+    code, so request processing never inserts arbitrary strings into a map.
+  - `RuntimeMetricsSnapshot` is an immutable value assembled for each scrape from
+    current broker, topic, partition, group, offset, recovery, retention, and
+    filesystem state.
+  - `PrometheusTextRenderer` renders one registry snapshot plus one runtime snapshot
+    in deterministic metric-family and label order.
+- Pass one registry instance from `BrokerServer` into `BrokerRuntime` and each
+  `BrokerProtocolSession`; do not use file-scope mutable metrics or independent
+  registries.
+- Global counters and histogram bucket counts use thread-safe numeric storage.
+  Dynamic topic/group gauges are collected as immutable scrape-time values rather
+  than stored forever in the registry, so deleting a topic or group removes its
+  series on the next scrape.
+- Snapshot locking follows this order:
+  1. copy topic `shared_ptr` values while holding `topics_mutex_`, then release it;
+  2. inspect one topic and partition at a time using the existing topic, append, and
+     log locks;
+  3. collect offset and group snapshots through new read-only snapshot APIs;
+  4. release all broker locks before rendering text.
+- A scrape never performs retention, mutates offsets, expires members, or waits for
+  append queues to drain. Concurrent scrapes and live broker traffic must be safe.
+- Histograms use seconds and cumulative buckets at `0.0005`, `0.001`, `0.0025`,
+  `0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`,
+  `30`, `60`, and `+Inf`. The upper buckets cover the configured long-poll path.
+- Metric and label names remain ASCII snake case. Correlation ids, member ids,
+  client endpoints, record keys, record values, tokens, and free-form error messages
+  are forbidden as metric labels.
+- `topic`, `partition`, and `group` labels are restricted to current resource gauges
+  where they are needed to diagnose queue depth, disk use, or consumer lag. Counter
+  labels use only finite operation, error-code, direction, and reason vocabularies.
+
+#### Locked Metric Catalog
+
+| Metric | Type and labels | Meaning |
+| --- | --- | --- |
+| `boltstream_build_info` | gauge; build metadata labels | Constant `1` with version, Git SHA, build type, compiler, protocol version, and storage format version. |
+| `boltstream_uptime_seconds` | gauge | Seconds since the broker startup timestamp. |
+| `boltstream_ready` | gauge | `1` only while recovery is complete, the data directory is writable, and shutdown has not started. |
+| `boltstream_connections_active` | gauge | Current accepted broker protocol sessions. |
+| `boltstream_connections_accepted_total` | counter | Broker sessions accepted since startup. |
+| `boltstream_connections_rejected_total{reason}` | counter | Connections rejected for a bounded reason such as `limit`. |
+| `boltstream_requests_total{operation}` | counter | Decoded broker requests by finite protocol operation. |
+| `boltstream_request_errors_total{operation,error_code}` | counter | Structured protocol failures, separate from total requests so error ratios remain direct. |
+| `boltstream_request_duration_seconds{operation}` | histogram | End-to-end broker processing time, including append queue time and fetch long-poll time. |
+| `boltstream_protocol_received_bytes_total` | counter | Frame header plus payload bytes received from broker clients. |
+| `boltstream_protocol_sent_bytes_total` | counter | Frame header plus payload bytes sent to broker clients. |
+| `boltstream_records_produced_total` | counter | Records durably appended through successful produce requests. |
+| `boltstream_records_fetched_total` | counter | Records returned in successful fetch responses. |
+| `boltstream_partition_append_queue_depth{topic,partition}` | gauge | Active plus pending append work for a current partition. |
+| `boltstream_partition_append_queue_capacity{topic,partition}` | gauge | Configured per-partition append queue limit. |
+| `boltstream_long_poll_waiters` | gauge | Current registered long-poll fetch waiters. |
+| `boltstream_rejected_requests_total{operation,reason}` | counter | Deterministic overload and limit rejections such as append queue or long-poll capacity. |
+| `boltstream_topics` | gauge | Current topic count. |
+| `boltstream_partitions` | gauge | Current partition count across all topics. |
+| `boltstream_partition_segments{topic,partition}` | gauge | Current segment count for each partition. |
+| `boltstream_partition_log_bytes{topic,partition}` | gauge | Current retained log bytes for each partition. |
+| `boltstream_partition_earliest_offset{topic,partition}` | gauge | Current retained low watermark. |
+| `boltstream_partition_next_offset{topic,partition}` | gauge | Current partition high watermark. |
+| `boltstream_storage_capacity_bytes` | gauge | Filesystem capacity containing the configured data directory. |
+| `boltstream_storage_available_bytes` | gauge | Bytes available to the broker on that filesystem. |
+| `boltstream_storage_recovery_duration_seconds` | gauge | Duration of the most recent startup recovery in this process. |
+| `boltstream_storage_recovered_records` | gauge | Records observed during startup recovery. |
+| `boltstream_storage_truncated_bytes` | gauge | Corrupt or partial tail bytes truncated during startup recovery. |
+| `boltstream_consumer_group_members{group,topic}` | gauge | Current active coordinated members for a current group/topic pair. |
+| `boltstream_consumer_group_generation{group,topic}` | gauge | Current coordinator generation. |
+| `boltstream_consumer_group_lag_records{group,topic,partition}` | gauge | `next_offset - committed_offset` for in-range durable group offsets; out-of-range offsets use the current earliest offset as the safe lag baseline. |
+| `boltstream_consumer_group_offset_out_of_range{group,topic,partition}` | gauge | `1` when a durable group offset is below the retained low watermark or above the high watermark, otherwise `0`. |
+| `boltstream_consumer_group_rebalances_total` | counter | Generation-changing rebalances since startup. |
+| `boltstream_consumer_group_heartbeat_failures_total` | counter | Rejected or expired heartbeat operations since startup. |
+| `boltstream_consumer_group_commit_failures_total` | counter | Fenced, invalid, or out-of-range group commits since startup. |
+| `boltstream_retention_runs_total` | counter | Manual, scheduled, startup, and append-triggered retention passes. |
+| `boltstream_retention_failures_total` | counter | Retention passes that failed. |
+| `boltstream_retention_deleted_segments_total` | counter | Complete inactive segments deleted since startup. |
+| `boltstream_retention_deleted_bytes_total` | counter | Log bytes deleted by retention since startup. |
+| `boltstream_retention_retained_bytes{topic,partition}` | gauge | Current bytes retained after the latest scrape-time partition snapshot. |
+| `boltstream_metrics_scrapes_total` | counter | `/metrics` requests served since startup. |
+| `boltstream_metrics_render_duration_seconds` | histogram | Time to collect and render the previous completed metrics scrapes. |
+| `boltstream_metrics_render_failures_total` | counter | Metrics snapshots or renders that returned an HTTP `500`. |
+
+#### Metrics Endpoint Contract
+
+- Parse the bounded admin request line into method, path, and query-free route instead
+  of extracting only the path.
+- `GET /metrics` returns `200`, `Content-Type: text/plain; version=0.0.4;
+  charset=utf-8`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, a
+  correct `Content-Length`, and `Connection: close`.
+- The existing health and version routes remain JSON. `/health/live` returns `200`
+  while the admin event loop can answer. `/health/ready` returns `200` only when
+  `boltstream_ready` is `1`, otherwise `503` with the current readiness detail.
+- Non-`GET` admin requests return `405` with `Allow: GET`; unknown paths return `404`.
+  Oversized or malformed request lines return `400` and never reach the renderer.
+- Rendering failure returns `500`, increments
+  `boltstream_metrics_render_failures_total`, and writes a structured
+  `metrics_render_failed` event without leaking a partial response body.
+- `metrics.enabled` defaults to `true`. When explicitly set to `false`, the broker
+  skips hot-path metric updates and returns `404` for `/metrics`; health and version
+  routes remain available.
+- The output contains exactly one `HELP` and `TYPE` declaration per family and emits
+  cumulative histogram `_bucket`, `_sum`, and `_count` samples. Unit tests feed the
+  result to `promtool check metrics` in the Linux/Compose verification path.
+
+#### Runtime Configuration Contract
+
+- Replace the current documentation-only `config/boltstream.example.yaml` with the
+  actual accepted schema. The top-level mappings are `server`, `storage`,
+  `retention`, `limits`, `metrics`, and `logging`.
+- Canonical keys are:
+  - `server.listen`, `server.admin_listen`;
+  - `storage.data_dir`, `storage.segment_bytes`,
+    `storage.segment_max_age_seconds`;
+  - `retention.max_age_seconds`, `retention.max_bytes`,
+    `retention.check_interval_ms`;
+  - `limits.max_frame_bytes`, `limits.max_fetch_records`,
+    `limits.max_fetch_bytes`, `limits.max_topic_partitions`,
+    `limits.max_fetch_wait_ms`, `limits.max_append_queue_depth`,
+    `limits.append_workers`, `limits.max_broker_connections`, and
+    `limits.max_long_poll_waiters`;
+  - `metrics.enabled`;
+  - `logging.level` with `debug`, `info`, `warn`, or `error`, and
+    `logging.format` locked to `json`.
+- Build, phase, protocol, and storage format versions are compiled metadata and are
+  removed from runtime configuration.
+- Add `include/boltstream/config/config.h` and `src/config/config.cpp`. Parsing is a
+  two-pass merge: compiled defaults, then YAML, then explicitly supplied CLI flags.
+  `BOLTSTREAM_BROKER_TOKEN` remains the only secret input and is never accepted from
+  the YAML file.
+- `--config PATH` loads a file. Existing deployments that omit it keep compiled
+  defaults. `--check-config` validates and exits before binding sockets or touching
+  the data directory. `--print-effective-config` prints deterministic YAML with
+  secret state represented only as `auth_required: true|false`.
+- Unknown top-level or nested keys, duplicate keys, wrong scalar types, invalid
+  endpoints, invalid enum values, integer overflow, and out-of-range limits fail
+  closed with the full key path and YAML line/column where available. Configuration
+  errors exit with code `2`.
+- All existing flags remain supported and override file values. `--help` documents
+  precedence, and startup emits `config_loaded` with the path and non-secret
+  effective settings.
+- Check in separate non-secret runtime files for the Docker demo and GCP service.
+  Docker binds the admin listener to the Compose network while publishing it only on
+  host loopback. GCP binds the admin listener to VM loopback.
+
+#### Operational Logging Contract
+
+- Move the anonymous `StructuredLogFields` and writer out of `server.cpp` into
+  `include/boltstream/observability/logger.h` and
+  `src/observability/logger.cpp`.
+- Each line is one valid JSON object written atomically to `stderr` for Docker and
+  journald capture. Required fields are `timestamp`, `level`, `event`, `component`,
+  and `git_sha`; request events add correlation id, operation, duration in
+  microseconds, error code, retryable state, and relevant bounded numeric state.
+- Convert retention, recovery, topic lifecycle, group, overload, config, metrics,
+  startup, and shutdown details from concatenated message strings into typed JSON
+  fields. Keep a human-readable `message` only when it adds information not already
+  represented by fields.
+- Log-level filtering occurs before JSON allocation. `debug` is available for local
+  diagnosis, while checked-in Docker and GCP configurations use `info`.
+- Broker tokens, record keys, record values, payload bodies, environment contents,
+  and config file contents are never logged. Proof artifacts omit client IPs and
+  other operator-specific endpoints.
+- Preserve correlation ids end to end for protocol request, response, and error
+  events. Log successful request duration once at completion and failure duration
+  once at the error response, avoiding double-counted latency metrics.
+
+#### Docker Compose, Prometheus, Grafana, and Alerts
+
+- Extend the runtime image to contain `boltstream-admin` as well as the server,
+  producer, consumer, benchmark shell, and log tool. Add a Docker health check
+  against `/health/ready`.
+- Expand `docker-compose.yml` with these services:
+  - `boltstream`: config-file-driven broker with persistent data and loopback-only
+    host ports `9000` and `9100`;
+  - `topic-init`: one-shot admin client that waits for readiness and creates the demo
+    topic idempotently;
+  - `producer`: deterministic one-shot traffic generator using the shipped producer
+    CLI;
+  - `consumer`: one-shot durable group consumer that intentionally leaves measurable
+    lag, followed by a documented catch-up command;
+  - `prometheus`: pinned `3.13.0` LTS image, persistent TSDB volume, a 5-second demo
+    scrape interval, checked-in rules, and loopback-only port `9090`;
+  - `grafana`: pinned `13.1.0` image, provisioned Prometheus datasource and dashboard,
+    persistent data volume, and loopback-only port `3000`.
+- Add `deployments/metrics/prometheus.yml`, `alerts.yml`, `alerts.test.yml`, Grafana
+  datasource/dashboard provisioning, and the BoltStream dashboard JSON. Do not
+  require manual UI setup.
+- The dashboard contains broker identity/readiness, uptime, connections, record and
+  byte rates, request errors, p50/p95/p99 request latency, append queue depth versus
+  capacity, long-poll waiters, partition bytes/segments/watermarks, filesystem free
+  ratio, group members/lag, rebalances, retention deletion, and recovery panels.
+- Checked-in Prometheus alerts are:
+  - `BoltStreamBrokerDown`: scrape target absent for one minute;
+  - `BoltStreamNotReady`: readiness is `0` for two minutes;
+  - `BoltStreamAppendOverload`: rejected append rate is nonzero for two minutes;
+  - `BoltStreamConsumerLagHigh`: maximum group lag exceeds `10000` records for five
+    minutes;
+  - `BoltStreamDiskNearlyFull`: available/capacity ratio remains below `0.15` for five
+    minutes;
+  - `BoltStreamRetentionFailure`: a retention failure occurs in the last five
+    minutes.
+- Validate Prometheus configuration and rules with `promtool check config` and
+  `promtool check rules`. Use `promtool test rules` with checked-in synthetic series
+  to prove every alert's pending, firing, and cleared behavior without adding a
+  five-minute wait to the smoke path. Query the Prometheus HTTP API during smoke
+  tests to prove that the target is up, metric series are ingested, documented
+  queries work, and the production rule group is loaded.
+
+#### File-Level Implementation Map
+
+- `CMakeLists.txt`: fetch pinned `yaml-cpp`, compile the config and observability
+  sources, install real config examples, and register new tests.
+- `include/boltstream/config/config.h`, `src/config/config.cpp`: schema, merge,
+  validation, check, and redacted effective-config rendering.
+- `include/boltstream/observability/metrics.h`,
+  `src/observability/metrics.cpp`: registry, snapshots, histogram implementation,
+  Prometheus renderer, escaping, and deterministic output.
+- `include/boltstream/observability/logger.h`,
+  `src/observability/logger.cpp`: JSON logger, severity filter, stable fields, and
+  secret-safe rendering.
+- `include/boltstream/broker/server.h`, `src/broker/server.cpp`: registry ownership,
+  instrumentation points, runtime snapshot creation, bounded admin request parsing,
+  `/metrics`, and finalized health semantics.
+- `include/boltstream/broker/group_coordinator.h` and implementation: read-only
+  current group/member/generation snapshots and event counters without expiring or
+  mutating members during scrape.
+- `include/boltstream/storage/offset_store.h` and implementation: read-only snapshot
+  of all durable group offsets for lag calculation.
+- `include/boltstream/storage/partition_log.h` and implementation: expose immutable
+  segment/log-byte/watermark state already derivable from segment summaries; no
+  metrics-specific storage writes.
+- `src/tools/server_main.cpp` and broker option parsing: two-pass config/CLI handling,
+  check/print modes, and documented exit codes.
+- `tests/config_tests.cpp`: defaults, full schema, precedence, invalid/unknown keys,
+  numeric bounds, YAML locations, secret exclusion, and deterministic redacted
+  output.
+- `tests/metrics_tests.cpp`: counters, concurrent increments, histogram bucket
+  cumulative behavior, label/help escaping, family ordering, disappearing dynamic
+  series, and golden Prometheus text.
+- `tests/client_broker_tests.cpp`: live admin HTTP status/header behavior, traffic and
+  error counter deltas, queue/storage/group/retention snapshots, recovery metrics,
+  concurrent traffic plus repeated scrapes, and clean shutdown.
+- `config/boltstream.example.yaml`, a Compose runtime config, and
+  `deployments/gcp/boltstream.yaml`: checked-in non-secret configuration for each
+  environment.
+- `Dockerfile`, `docker-compose.yml`, and `deployments/metrics/`: complete local
+  operator stack, health dependencies, traffic demo, alerts, and dashboard.
+- `scripts/smoke-phase9.ps1`: native config/health/metrics/log smoke and Compose
+  ingestion/dashboard prerequisites.
+- `deployments/gcp/scripts/deploy.ps1`: upload the checked-in GCP config, run the
+  exact release binary in `--check-config` mode before installation, install config
+  as root-owned `0640`, and start systemd with `--config`.
+- `deployments/gcp/scripts/metrics-tunnel.ps1`: fail-closed account/project guard and
+  SSH local forward from operator `127.0.0.1:19100` to VM
+  `127.0.0.1:9100`.
+- `deployments/gcp/scripts/smoke-live.ps1` and `inspect-live.ps1`: traffic, metric
+  delta, lag, log, config, filesystem, and restored-service assertions.
+- `README.md`, `docs/operations.md`, `docs/gcp.md`: quickstart, metric catalog,
+  PromQL, dashboards, config, tunnel, and incident runbooks.
+- `proof/phase-9.md`: exact pushed/deployed SHA, CI run, local commands, Compose
+  checks, tunnel queries, metric before/after evidence, journal evidence, systemd
+  state, data/filesystem state, and Terraform drift result.
+
+#### Implementation Sequence
+
+1. Add the pinned YAML dependency, config schema, two-pass precedence logic,
+   validation, check/print modes, and config tests before changing systemd or Compose.
+2. Extract the structured logger without changing existing event meaning; run the
+   current Phase 3 through Phase 8 tests and smokes to prove behavior is preserved.
+3. Implement the metrics registry, histograms, renderer, and unit/golden tests with
+   no broker integration.
+4. Add read-only topic, partition, offset, and coordinator snapshot APIs with explicit
+   lock-order tests and disappearing-series coverage.
+5. Instrument connections, protocol operations, append/fetch completions, errors,
+   overload, group events, retention, startup recovery, and shutdown. Counter updates
+   occur at one defined success/failure boundary per operation.
+6. Add the bounded admin HTTP parser, `/metrics`, finalized health status behavior,
+   response headers, and concurrent integration tests.
+7. Replace ad hoc command lines in Docker and GCP with checked-in validated config
+   files; retain CLI overrides for smoke-only fault injection and backward
+   compatibility.
+8. Build the pinned Prometheus/Grafana Compose stack, provision the dashboard and
+   alerts, and automate target/query validation in `smoke-phase9.ps1`.
+9. Expand operations/GCP documentation and scripts, including the guarded SSH tunnel
+   and a local Prometheus scrape target for that tunnel.
+10. Run all local, CI, deployment, live metric/log, cleanup, and drift gates; only then
+    write `proof/phase-9.md` and mark Phase 9 complete.
+
+#### Local and CI Verification
+
+- `--check-config` accepts every checked-in config and rejects fixtures for unknown,
+  duplicate, mistyped, missing, overflowed, and invalid values before creating data
+  files or binding ports.
+- `--print-effective-config` proves defaults < YAML < CLI precedence and contains no
+  token or environment value.
+- GCC, Clang, and MSVC native builds compile the new dependency and observability
+  code; the standard formatting, warning-as-error, unit, integration, and smoke gates
+  remain green.
+- Golden metrics pass `promtool check metrics`; Prometheus config and alerts pass
+  `promtool check config`, `promtool check rules`, and `promtool test rules`.
+- A deterministic integration test records a baseline scrape, produces and fetches
+  records, forces an overload error, creates group lag, runs retention, then proves
+  exact counter deltas and current gauges.
+- The concurrency test drives append workers, long-poll fetch, group heartbeats,
+  retention, topic lifecycle, and repeated `/metrics` scrapes together without data
+  races, deadlocks, malformed output, or more than one scrape interval of blocking.
+- Docker Compose reaches healthy state, one-shot demo services finish successfully,
+  Prometheus reports `up{job="boltstream"} == 1`, documented PromQL returns samples,
+  and Grafana provisioning exposes the BoltStream dashboard without manual edits.
+- Existing Phase 2 through Phase 8 smoke scripts pass unchanged or with only their
+  launch path migrated to the new config file.
+
+#### Live GCP Verification
+
+1. Commit and push the implementation; require all GitHub CI jobs to pass for the
+   exact SHA and download that SHA's Linux release artifact.
+2. Refresh the guarded operator `/32`, run Terraform plan, and require no unintended
+   infrastructure changes. Phase 9 does not open port `9100` publicly.
+3. Deploy the exact CI artifact plus checked-in GCP YAML. Prove remote
+   `--check-config`, file ownership/mode, systemd `ExecStart --config`, `/version`
+   SHA, `/health/live`, and `/health/ready`.
+4. Start the guarded SSH tunnel and call `/metrics` through operator
+   `127.0.0.1:19100`. Prove content type, Prometheus validation, build-info SHA,
+   readiness, recovery, filesystem, and initial scrape counters.
+5. Run authenticated live traffic and capture before/after samples proving produce
+   and fetch request counts, records, protocol bytes, duration histogram counts,
+   active connections, partition watermarks, segment bytes, and queue depth.
+6. Create a durable consumer group with measurable lag, prove the group/member/lag
+   series, consume to the high watermark, and prove the lag reaches zero.
+7. Use a temporary validated config override to force one deterministic append
+   overload, prove the error and rejection counters plus matching JSON journal event,
+   then restore the checked-in GCP config and healthy service.
+8. Run retention against a live disposable topic, prove deleted-segment/deleted-byte
+   counter deltas and retained storage gauges, then delete the topic and prove its
+   dynamic metric series disappear.
+9. Point the local Prometheus/Grafana stack at the SSH tunnel, prove the live target
+   is up, query the dashboard series, and inspect alert evaluation without installing
+   observability daemons on the VM.
+10. SSH-inspect systemd, JSON journal lines, effective config, release symlink, data
+    files, disk capacity, and resource use. Remove disposable topics, stop the tunnel
+    and local operator stack, restore the normal config, and require a final healthy
+    service plus clean Terraform plan.
+
+#### Acceptance
+
+- Metrics expose traffic, latency, records/bytes, connections, storage, queue,
+  long-poll, error, group, lag, retention, recovery, readiness, and filesystem state
+  with stable documented names and bounded labels.
+- A local operator can diagnose throughput, p95/p99 latency, append saturation, a
+  slow consumer, disk growth, low free space, retention failures, and recovery from
+  checked-in PromQL, dashboard panels, alerts, and JSON logs.
+- File-backed configuration is real, strict, validated before side effects, safely
+  overridden by CLI, deployed through systemd, and secret-free in source and output.
+- The Compose demo is reproducible from a clean checkout and exercises the shipped
+  broker, admin, producer, consumer, Prometheus, Grafana, dashboard, and rules.
+- The live GCP broker exposes no new public operations port; the complete metrics and
+  dashboard path is proven through a guarded SSH tunnel against the exact pushed and
+  CI-tested commit.
+- `proof/phase-9.md` records local, CI, Compose, GCP, metrics, logs, config, cleanup,
+  and drift evidence. Phase 9 is not complete from local metrics screenshots or a
+  successful `/health/ready` response alone.
 
 ### Phase 10: Benchmarking and Performance Engineering
 
@@ -856,6 +1265,9 @@ Before implementation starts, validate and document these choices:
 - Current Secret Manager Free Tier documentation lists 6 active secret versions and 10,000 access operations per month.
 - [Compute Engine product documentation](https://cloud.google.com/products/compute) summarizes the free tier as one `e2-micro` VM, up to 30 GB standard persistent disk, and up to 1 GB outbound data transfer per month.
 - These constraints must be verified again at bootstrap time and before any infrastructure expansion.
+- [Prometheus scrape content-negotiation documentation](https://prometheus.io/docs/instrumenting/content_negotiation/) keeps Prometheus text `0.0.4` as the required fallback when no other supported format is negotiated; Phase 9 deliberately implements that stable compatibility baseline.
+- [Prometheus exporter guidance](https://prometheus.io/docs/instrumenting/writing_exporters/) requires base units, `_total` counters, cumulative histogram buckets, minimal labels, and scrape-time timestamps supplied by Prometheus rather than the target; the Phase 9 metric catalog follows those rules.
+- The current pinned source releases checked during Phase 9 planning are [yaml-cpp `0.9.0`](https://github.com/jbeder/yaml-cpp/releases/tag/yaml-cpp-0.9.0), [Prometheus `3.13.0` LTS](https://github.com/prometheus/prometheus/releases/tag/v3.13.0), and [Grafana `13.1.0`](https://github.com/grafana/grafana/releases/tag/v13.1.0). Re-check their image digests immediately before implementation and record the chosen immutable digests in the repository.
 
 ## Decision Questions With Locked Answers
 

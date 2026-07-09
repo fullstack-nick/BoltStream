@@ -55,6 +55,20 @@ jobs:
         if: matrix.build_type == 'Debug'
         run: pwsh ./scripts/format.ps1
 
+      - name: Validate Phase 9 operations assets
+        if: matrix.build_type == 'Debug'
+        run: |
+          docker compose config --quiet
+          docker run --rm --entrypoint /bin/promtool \
+            -v "$PWD/deployments/metrics:/etc/prometheus:ro" \
+            prom/prometheus@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7 \
+            check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint /bin/promtool \
+            -v "$PWD/deployments/metrics:/etc/prometheus:ro" \
+            -w /etc/prometheus \
+            prom/prometheus@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7 \
+            test rules alerts.test.yml
+
       - name: Package Linux artifact
         if: matrix.build_type == 'Release'
         run: |
@@ -87,3 +101,7 @@ jobs:
       - name: Phase 7 smoke
         shell: pwsh
         run: ./scripts/smoke-phase7.ps1 -Preset windows-msvc-debug
+
+      - name: Phase 9 smoke
+        shell: pwsh
+        run: ./scripts/smoke-phase9.ps1 -Preset windows-msvc-debug

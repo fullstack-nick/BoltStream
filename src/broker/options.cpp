@@ -1,5 +1,7 @@
 #include "boltstream/broker/options.h"
 
+#include "boltstream/config/config.h"
+
 #include <charconv>
 #include <limits>
 #include <sstream>
@@ -71,10 +73,45 @@ bool parse_endpoint(std::string_view text, Endpoint& endpoint) {
   return true;
 }
 
+bool parse_bool(std::string_view text, bool& value) {
+  if (text == "true") {
+    value = true;
+    return true;
+  }
+  if (text == "false") {
+    value = false;
+    return true;
+  }
+  return false;
+}
+
 } // namespace
 
 ParsedServerOptions parse_server_options(std::span<const std::string_view> args) {
   ParsedServerOptions parsed;
+
+  for (std::size_t index = 0; index < args.size(); ++index) {
+    if (args[index] != "--config") {
+      continue;
+    }
+    if (index + 1 >= args.size()) {
+      parsed.error = "missing value for --config";
+      return parsed;
+    }
+    if (!parsed.config_path.empty()) {
+      parsed.error = "--config may be supplied only once";
+      return parsed;
+    }
+    parsed.config_path = std::filesystem::path{std::string{args[++index]}};
+  }
+  if (!parsed.config_path.empty()) {
+    const auto loaded = config::load_server_config(parsed.config_path, parsed.options);
+    if (!loaded.ok) {
+      parsed.error = loaded.error;
+      return parsed;
+    }
+    parsed.config_loaded = true;
+  }
 
   for (std::size_t index = 0; index < args.size(); ++index) {
     const auto arg = args[index];
@@ -92,6 +129,12 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
       parsed.help_requested = true;
     } else if (arg == "--version") {
       parsed.version_requested = true;
+    } else if (arg == "--check-config") {
+      parsed.check_config_requested = true;
+    } else if (arg == "--print-effective-config") {
+      parsed.print_effective_config_requested = true;
+    } else if (arg == "--config") {
+      (void)require_value(arg);
     } else if (arg == "--listen") {
       Endpoint endpoint;
       if (!parse_endpoint(require_value(arg), endpoint)) {
@@ -214,6 +257,27 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
         return parsed;
       }
       parsed.options.retention_check_interval_ms = retention_check_interval_ms;
+    } else if (arg == "--metrics-enabled") {
+      bool enabled{};
+      if (!parse_bool(require_value(arg), enabled)) {
+        parsed.error = "invalid --metrics-enabled value, expected true or false";
+        return parsed;
+      }
+      parsed.options.metrics_enabled = enabled;
+    } else if (arg == "--log-level") {
+      const auto level = require_value(arg);
+      if (level != "debug" && level != "info" && level != "warn" && level != "error") {
+        parsed.error = "invalid --log-level value, expected debug, info, warn, or error";
+        return parsed;
+      }
+      parsed.options.log_level = std::string{level};
+    } else if (arg == "--log-format") {
+      const auto format = require_value(arg);
+      if (format != "json") {
+        parsed.error = "invalid --log-format value, expected json";
+        return parsed;
+      }
+      parsed.options.log_format = std::string{format};
     } else {
       parsed.error = "unknown argument: " + std::string{arg};
       return parsed;
@@ -224,7 +288,8 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
 }
 
 std::string server_usage() {
-  return "Usage: boltstream-server [--listen HOST:PORT] [--port PORT] "
+  return "Usage: boltstream-server [--config PATH] [--check-config] "
+         "[--print-effective-config] [--listen HOST:PORT] [--port PORT] "
          "[--admin-listen HOST:PORT] [--data PATH] [--max-frame-bytes BYTES] "
          "[--max-fetch-records N] [--max-fetch-bytes BYTES] "
          "[--max-topic-partitions N] [--max-fetch-wait-ms MS] "
@@ -232,7 +297,11 @@ std::string server_usage() {
          "[--max-broker-connections N] [--max-long-poll-waiters N] "
          "[--segment-bytes BYTES] [--segment-max-age-seconds SECONDS] "
          "[--retention-max-age-seconds SECONDS] [--retention-max-bytes BYTES] "
-         "[--retention-check-interval-ms MS]\n"
+         "[--retention-check-interval-ms MS] [--metrics-enabled true|false] "
+         "[--log-level debug|info|warn|error] [--log-format json]\n"
+         "\n"
+         "Precedence: compiled defaults < YAML config < explicit CLI flags.\n"
+         "BOLTSTREAM_BROKER_TOKEN is environment-only and is never read from YAML.\n"
          "\n"
          "Defaults:\n"
          "  --listen 0.0.0.0:9000\n"
@@ -251,7 +320,10 @@ std::string server_usage() {
          "  --segment-max-age-seconds 3600\n"
          "  --retention-max-age-seconds 604800\n"
          "  --retention-max-bytes 1073741824\n"
-         "  --retention-check-interval-ms 60000\n";
+         "  --retention-check-interval-ms 60000\n"
+         "  --metrics-enabled true\n"
+         "  --log-level info\n"
+         "  --log-format json\n";
 }
 
 std::string endpoint_to_string(const Endpoint& endpoint) {

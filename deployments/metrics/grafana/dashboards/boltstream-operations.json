@@ -1,0 +1,32 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {"type": "stat", "title": "Ready", "id": 1, "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0}, "targets": [{"expr": "boltstream_ready", "refId": "A"}]},
+    {"type": "stat", "title": "Uptime", "id": 2, "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0}, "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}, "targets": [{"expr": "boltstream_uptime_seconds", "refId": "A"}]},
+    {"type": "stat", "title": "Connections", "id": 3, "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0}, "targets": [{"expr": "boltstream_connections_active", "refId": "A"}]},
+    {"type": "stat", "title": "Filesystem Free", "id": 4, "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}, "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []}, "targets": [{"expr": "boltstream_storage_available_bytes / boltstream_storage_capacity_bytes", "refId": "A"}]},
+    {"type": "stat", "title": "Consumer Lag", "id": 5, "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}, "targets": [{"expr": "max(boltstream_consumer_group_lag_records)", "refId": "A"}]},
+    {"type": "timeseries", "title": "Record Throughput", "id": 6, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}, "targets": [{"expr": "rate(boltstream_records_produced_total[1m])", "legendFormat": "produced", "refId": "A"}, {"expr": "rate(boltstream_records_fetched_total[1m])", "legendFormat": "fetched", "refId": "B"}]},
+    {"type": "timeseries", "title": "Request Latency", "id": 7, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}, "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}, "targets": [{"expr": "histogram_quantile(0.50, sum by (le, operation) (rate(boltstream_request_duration_seconds_bucket[5m])))", "legendFormat": "p50 {{operation}}", "refId": "A"}, {"expr": "histogram_quantile(0.95, sum by (le, operation) (rate(boltstream_request_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{operation}}", "refId": "B"}, {"expr": "histogram_quantile(0.99, sum by (le, operation) (rate(boltstream_request_duration_seconds_bucket[5m])))", "legendFormat": "p99 {{operation}}", "refId": "C"}]},
+    {"type": "timeseries", "title": "Protocol Bytes", "id": 8, "gridPos": {"h": 8, "w": 8, "x": 0, "y": 12}, "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []}, "targets": [{"expr": "rate(boltstream_protocol_received_bytes_total[1m])", "legendFormat": "received", "refId": "A"}, {"expr": "rate(boltstream_protocol_sent_bytes_total[1m])", "legendFormat": "sent", "refId": "B"}]},
+    {"type": "timeseries", "title": "Append Queue", "id": 9, "gridPos": {"h": 8, "w": 8, "x": 8, "y": 12}, "targets": [{"expr": "boltstream_partition_append_queue_depth", "legendFormat": "{{topic}}/{{partition}} depth", "refId": "A"}, {"expr": "boltstream_partition_append_queue_capacity", "legendFormat": "{{topic}}/{{partition}} capacity", "refId": "B"}]},
+    {"type": "timeseries", "title": "Partition Storage", "id": 10, "gridPos": {"h": 8, "w": 8, "x": 16, "y": 12}, "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}, "targets": [{"expr": "boltstream_partition_log_bytes", "legendFormat": "{{topic}}/{{partition}}", "refId": "A"}]},
+    {"type": "timeseries", "title": "Errors and Rejections", "id": 11, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20}, "targets": [{"expr": "sum by (operation, error_code) (rate(boltstream_request_errors_total[5m]))", "legendFormat": "{{operation}} {{error_code}}", "refId": "A"}, {"expr": "sum by (operation, reason) (rate(boltstream_rejected_requests_total[5m]))", "legendFormat": "{{operation}} {{reason}}", "refId": "B"}]},
+    {"type": "timeseries", "title": "Groups and Retention", "id": 12, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20}, "targets": [{"expr": "boltstream_consumer_group_lag_records", "legendFormat": "lag {{group}}/{{topic}}/{{partition}}", "refId": "A"}, {"expr": "rate(boltstream_retention_deleted_bytes_total[5m])", "legendFormat": "retention bytes/s", "refId": "B"}, {"expr": "boltstream_long_poll_waiters", "legendFormat": "long poll waiters", "refId": "C"}]}
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["boltstream", "operations"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "BoltStream Operations",
+  "uid": "boltstream-operations",
+  "version": 1
+}

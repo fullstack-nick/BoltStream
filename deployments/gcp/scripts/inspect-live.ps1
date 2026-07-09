@@ -28,6 +28,12 @@ journalctl -u boltstream.service --since "${ACTIVE_SINCE}" -n 80 --no-pager
 echo "== version =="
 curl -fsS http://127.0.0.1:9100/version
 echo
+echo "== metrics summary =="
+curl -fsS http://127.0.0.1:9100/metrics | grep -E '^boltstream_(build_info|ready|uptime_seconds|storage_(capacity|available)_bytes|metrics_scrapes_total)' || true
+echo "== config =="
+stat -c '%U %G %a %n' /etc/boltstream/boltstream.yaml /etc/boltstream/boltstream.env
+/opt/boltstream/current/bin/boltstream-server --config /etc/boltstream/boltstream.yaml --check-config
+cat /etc/boltstream/boltstream.yaml
 echo "== data dir =="
 df -h /var/lib/boltstream
 ls -la /var/lib/boltstream

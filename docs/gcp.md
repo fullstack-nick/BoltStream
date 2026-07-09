@@ -62,13 +62,18 @@ Download or build the CI Linux artifact, then deploy it by exact Git SHA:
   -GitSha <sha>
 ```
 
-The deploy script installs to `/opt/boltstream/releases/<git-sha>`, updates `/opt/boltstream/current`, writes a systemd unit, restarts `boltstream.service`, and checks `/version` on the VM.
+The deploy script installs to `/opt/boltstream/releases/<git-sha>`, validates the
+checked-in `deployments/gcp/boltstream.yaml` with that exact release binary, installs
+it as root-owned `/etc/boltstream/boltstream.yaml` mode `0640`, updates
+`/opt/boltstream/current`, writes a config-driven systemd unit, restarts
+`boltstream.service`, and checks `/version` on the VM.
 From Phase 4 onward, deploy also reads the latest `boltstream-broker-token` Secret Manager version and writes it to `/etc/boltstream/boltstream.env`; deploy fails if that secret payload is missing.
 
 ## Live Smoke
 
 ```powershell
 .\deployments\gcp\scripts\smoke-live.ps1 -ExpectedGitSha <sha>
+.\deployments\gcp\scripts\smoke-phase9-live.ps1 -ExpectedGitSha <sha>
 .\deployments\gcp\scripts\inspect-live.ps1
 ```
 
@@ -77,7 +82,31 @@ Live proof must verify:
 - TCP broker port `9000` is reachable from the operator machine.
 - Authenticated producer and consumer calls succeed against the live broker.
 - `/health/live`, `/health/ready`, and `/version` succeed over SSH on localhost.
+- `/metrics` succeeds through a guarded SSH tunnel and reports the deployed Git SHA,
+  readiness, traffic, latency, storage, consumer lag, retention, and filesystem state.
 - `/version` reports the deployed Git SHA.
 - `systemctl status boltstream` is active.
 - `journalctl -u boltstream` shows clean startup and no errors after live calls.
 - `/var/lib/boltstream` is mounted and writable by the service user, with topic segment/index files present after live produce.
+
+## Private Metrics Tunnel
+
+The admin and metrics port is never opened publicly. Start the guarded tunnel from a
+second operator terminal:
+
+```powershell
+.\deployments\gcp\scripts\metrics-tunnel.ps1
+```
+
+Then inspect the live service locally:
+
+```powershell
+curl.exe -fsS http://127.0.0.1:19100/health/ready
+curl.exe -fsS http://127.0.0.1:19100/version
+curl.exe -fsS http://127.0.0.1:19100/metrics
+```
+
+The helper fails closed unless the active account is `nickaccturk@gmail.com` and the
+active project is `boltstream-r7m5o9ld`. The local Prometheus/Grafana stack can scrape
+the same tunnel with `deployments/metrics/prometheus-live.yml`; the VM remains a lean
+broker-only `e2-micro` deployment.

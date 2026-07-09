@@ -1,0 +1,44 @@
+groups:
+  - name: boltstream.operations
+    rules:
+      - alert: BoltStreamBrokerDown
+        expr: up{job="boltstream"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: BoltStream scrape target is down
+      - alert: BoltStreamNotReady
+        expr: boltstream_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: BoltStream is live but not ready
+      - alert: BoltStreamAppendOverload
+        expr: sum(rate(boltstream_rejected_requests_total{operation="produce",reason="append_queue"}[2m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: BoltStream append queue is rejecting produce requests
+      - alert: BoltStreamConsumerLagHigh
+        expr: max(boltstream_consumer_group_lag_records) > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A BoltStream consumer group is more than 10000 records behind
+      - alert: BoltStreamDiskNearlyFull
+        expr: boltstream_storage_available_bytes / boltstream_storage_capacity_bytes < 0.15
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: BoltStream data filesystem has less than 15 percent free
+      - alert: BoltStreamRetentionFailure
+        expr: increase(boltstream_retention_failures_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: BoltStream retention failed

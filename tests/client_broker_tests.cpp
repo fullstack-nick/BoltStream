@@ -26,6 +26,7 @@ struct RunningServer {
   std::unique_ptr<boltstream::broker::BrokerServer> server;
   std::thread thread;
   std::uint16_t port{0};
+  std::uint16_t admin_port{0};
 
   ~RunningServer() {
     if (server) {
@@ -115,6 +116,7 @@ start_server(std::filesystem::path data_dir = {},
       std::make_unique<boltstream::broker::BrokerServer>(options, boltstream::current_build_info());
   running->server->start();
   running->port = running->server->broker_port();
+  running->admin_port = running->server->admin_port();
   running->thread =
       std::thread([server = running->server.get()] { server->wait_for_shutdown_signal(); });
   return running;
@@ -123,6 +125,53 @@ start_server(std::filesystem::path data_dir = {},
 std::vector<std::uint8_t> bytes(std::string_view text) { return {text.begin(), text.end()}; }
 
 std::string text(const std::vector<std::uint8_t>& bytes) { return {bytes.begin(), bytes.end()}; }
+
+std::string admin_request(std::uint16_t port, std::string_view request) {
+  boost::asio::io_context io;
+  boost::asio::ip::tcp::socket socket{io};
+  socket.connect({boost::asio::ip::make_address("127.0.0.1"), port});
+  boost::asio::write(socket, boost::asio::buffer(request));
+  std::string response;
+  std::array<char, 4096> buffer{};
+  for (;;) {
+    boost::system::error_code ec;
+    const auto read = socket.read_some(boost::asio::buffer(buffer), ec);
+    response.append(buffer.data(), read);
+    if (ec == boost::asio::error::eof) {
+      break;
+    }
+    if (ec) {
+      throw boost::system::system_error{ec};
+    }
+  }
+  return response;
+}
+
+std::string fragmented_admin_request(std::uint16_t port,
+                                     const std::vector<std::string_view>& fragments) {
+  boost::asio::io_context io;
+  boost::asio::ip::tcp::socket socket{io};
+  socket.connect({boost::asio::ip::make_address("127.0.0.1"), port});
+  for (const auto fragment : fragments) {
+    boost::asio::write(socket, boost::asio::buffer(fragment));
+    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+  }
+
+  std::string response;
+  std::array<char, 4096> buffer{};
+  for (;;) {
+    boost::system::error_code ec;
+    const auto read = socket.read_some(boost::asio::buffer(buffer), ec);
+    response.append(buffer.data(), read);
+    if (ec == boost::asio::error::eof) {
+      break;
+    }
+    if (ec) {
+      throw boost::system::system_error{ec};
+    }
+  }
+  return response;
+}
 
 boltstream::protocol::ErrorResponse decode_error(const boltstream::protocol::Frame& frame) {
   boltstream::protocol::ErrorResponse response;
@@ -414,6 +463,96 @@ TEST(ClientBrokerTests, HealthRequestReturnsReady) {
   EXPECT_EQ(response.status, "ready");
 }
 
+TEST(ClientBrokerTests, AdminMetricsExposeTrafficStorageAndPrometheusHeaders) {
+  const auto running = start_server();
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+
+  auto created = create_topic(running->port, "metrics", 1, seen_error, timed_out);
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+  auto produced = produce(running->port, "metrics", "AAPL", "100", seen_error, timed_out);
+  ASSERT_EQ(produced.header.frame_type, boltstream::protocol::FrameType::ProduceResponse);
+  auto fetched = fetch(running->port, "metrics", "beginning", seen_error, timed_out);
+  ASSERT_EQ(fetched.header.frame_type, boltstream::protocol::FrameType::FetchResponse);
+
+  const auto response = admin_request(
+      running->admin_port,
+      "GET /metrics?source=test HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+  EXPECT_NE(response.find("HTTP/1.1 200 OK"), std::string::npos);
+  EXPECT_NE(response.find("Content-Type: text/plain; version=0.0.4; charset=utf-8"),
+            std::string::npos);
+  EXPECT_NE(response.find("Cache-Control: no-store"), std::string::npos);
+  EXPECT_NE(response.find("boltstream_requests_total{operation=\"produce\"} 1"), std::string::npos);
+  EXPECT_NE(response.find("boltstream_records_produced_total 1"), std::string::npos);
+  EXPECT_NE(response.find("boltstream_records_fetched_total 1"), std::string::npos);
+  EXPECT_NE(response.find("boltstream_partition_log_bytes{topic=\"metrics\",partition=\"0\"}"),
+            std::string::npos);
+  EXPECT_NE(response.find("boltstream_metrics_scrapes_total 1"), std::string::npos);
+}
+
+TEST(ClientBrokerTests, AdminHttpRejectsBadMethodsAndCanDisableMetrics) {
+  const auto running = start_server({}, [](auto& options) { options.metrics_enabled = false; });
+
+  const auto method =
+      admin_request(running->admin_port,
+                    "POST /health/live HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+  EXPECT_NE(method.find("HTTP/1.1 405 Method Not Allowed"), std::string::npos);
+  EXPECT_NE(method.find("Allow: GET"), std::string::npos);
+
+  const auto metrics = admin_request(
+      running->admin_port, "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+  EXPECT_NE(metrics.find("HTTP/1.1 404 Not Found"), std::string::npos);
+}
+
+TEST(ClientBrokerTests, AdminHttpWaitsForACompleteFragmentedRequest) {
+  const auto running = start_server();
+  const auto response = fragmented_admin_request(
+      running->admin_port,
+      {"GET /health", "/live HTTP/1.1\r\nHost: 127.0.0.1\r\n", "Connection: close\r\n\r\n"});
+
+  EXPECT_NE(response.find("HTTP/1.1 200 OK"), std::string::npos);
+  EXPECT_NE(response.find("\"status\":\"live\""), std::string::npos);
+}
+
+TEST(ClientBrokerTests, ConcurrentMetricsScrapesRemainWellFormedDuringTraffic) {
+  const auto running = start_server();
+  boost::system::error_code seen_error;
+  bool timed_out = false;
+  auto created = create_topic(running->port, "scrapes", 1, seen_error, timed_out);
+  ASSERT_EQ(created.header.frame_type, boltstream::protocol::FrameType::CreateTopicResponse);
+
+  std::atomic<std::uint32_t> failures{0};
+  std::vector<std::thread> scrapers;
+  for (std::size_t thread = 0; thread < 4; ++thread) {
+    scrapers.emplace_back([&] {
+      for (std::size_t scrape = 0; scrape < 20; ++scrape) {
+        try {
+          const auto response = admin_request(
+              running->admin_port,
+              "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+          if (!response.starts_with("HTTP/1.1 200 OK") ||
+              response.find("# TYPE boltstream_request_duration_seconds histogram") ==
+                  std::string::npos ||
+              response.back() != '\n') {
+            failures.fetch_add(1);
+          }
+        } catch (const std::exception&) {
+          failures.fetch_add(1);
+        }
+      }
+    });
+  }
+  for (std::size_t index = 0; index < 20; ++index) {
+    auto produced =
+        produce(running->port, "scrapes", std::to_string(index), "value", seen_error, timed_out);
+    ASSERT_EQ(produced.header.frame_type, boltstream::protocol::FrameType::ProduceResponse);
+  }
+  for (auto& scraper : scrapers) {
+    scraper.join();
+  }
+  EXPECT_EQ(failures.load(), 0U);
+}
+
 TEST(ClientBrokerTests, ProduceFetchAndMetadataRoundTrip) {
   const auto running = start_server();
   boost::system::error_code seen_error;
@@ -638,7 +777,7 @@ TEST(ClientBrokerTests, RetentionRunFreesInactiveSegmentsAndReportsOffsetOutOfRa
   auto running = start_server(data_dir, [](auto& options) {
     options.segment_bytes = 96;
     options.segment_max_age_seconds = 0;
-    options.retention_max_age_seconds = 1;
+    options.retention_max_age_seconds = 3600;
     options.retention_max_bytes = 0;
     options.retention_check_interval_ms = 0;
   });
@@ -664,7 +803,7 @@ TEST(ClientBrokerTests, RetentionRunFreesInactiveSegmentsAndReportsOffsetOutOfRa
   ASSERT_GE(logs.size(), 3U);
   for (std::size_t index = 0; index + 1 < logs.size(); ++index) {
     std::filesystem::last_write_time(logs[index], std::filesystem::file_time_type::clock::now() -
-                                                      std::chrono::seconds(10));
+                                                      std::chrono::hours(2));
   }
 
   auto retained = run_retention(running->port, "retained", seen_error, timed_out);

@@ -2,17 +2,21 @@
 
 BoltStream is a C++20 low-latency event streaming engine: a Kafka-inspired broker built from scratch to demonstrate Linux networking, durable storage, concurrency, testing, performance measurement, and cloud-native deployment.
 
-Phase 8 adds broker-backed retention, topic lifecycle, admin topic/group
-inspection, group offset reset, and offset-out-of-range behavior on top of the
-coordinated Phase 7 broker runtime.
+Phase 9 adds strict YAML configuration, Prometheus metrics, hardened health
+contracts, structured operational logging, alerts, and a provisioned Grafana
+dashboard on top of the Phase 8 retention and lifecycle runtime.
 
-## Current Phase 8 Surface
+## Current Phase 9 Surface
 
 - `boltstream-server` opens broker TCP port `9000`.
 - Admin HTTP listens on `127.0.0.1:9100`.
 - `GET /health/live` reports process liveness.
 - `GET /health/ready` reports data-directory readiness.
 - `GET /version` reports service name, Git SHA, build type, compiler, protocol version `4`, storage format version `2`, and startup time.
+- `GET /metrics` exposes Prometheus text `0.0.4` for traffic, latency, connections,
+  queues, storage, consumer lag, retention, recovery, and filesystem capacity.
+- `--config`, `--check-config`, and `--print-effective-config` provide strict YAML
+  configuration with CLI overrides and secret-free effective output.
 - Broker TCP port `9000` accepts versioned binary frames with correlation ids and structured error responses.
 - `boltstream-admin topics create` creates topics with an immutable partition count before produce.
 - `boltstream-admin topics list|describe|delete` inspects and safely deletes topics through the broker.
@@ -27,7 +31,9 @@ coordinated Phase 7 broker runtime.
 - Long-poll waiter state, broker sessions, frame sizes, fetch records, and fetch bytes are bounded by server options.
 - Segment retention is configurable by age and size. Retention deletes inactive complete segments and exposes retained low watermarks.
 - Fetching or committing retained-away offsets returns `offset_out_of_range`.
-- Broker runtime logs are structured JSON lines with event names, correlation ids, error codes, retryable flags, queue/waiter state, and request duration.
+- Broker runtime logs are structured JSON lines with build identity, component,
+  event names, correlation ids, error codes, retryable flags, queue/waiter state,
+  and request duration in microseconds.
 - `boltstream-logtool` remains available for direct append, read, and recovery inspection of durable records.
 - `BOLTSTREAM_BROKER_TOKEN` enables broker-protocol auth; local development may omit it, while GCP deploys require it.
 - `boltstream-bench` remains a stable benchmark shell until the benchmark phase.
@@ -52,16 +58,25 @@ Docker remains the Linux parity path because GCP runs Linux.
 
 ```powershell
 docker build --target builder -t boltstream-builder .
-docker compose up --build
+docker compose up --build -d
+docker compose ps -a
+curl.exe -fsS http://127.0.0.1:9090/api/v1/query?query=up
+curl.exe -fsS http://127.0.0.1:3000/api/health
 ```
+
+The Compose demo creates a topic, produces 25 records, consumes and commits the
+first 10, leaves visible group lag, scrapes the broker with Prometheus, and
+provisions the `BoltStream Operations` dashboard in Grafana. Host ports `9000`,
+`9100`, `9090`, and `3000` bind to loopback only.
 
 ## Local Server Smoke
 
 ```powershell
-.\build\windows-gcc-debug\boltstream-server.exe --listen 127.0.0.1:9000 --admin-listen 127.0.0.1:9100 --data .\data
+.\build\windows-gcc-debug\boltstream-server.exe --config .\config\boltstream.example.yaml --listen 127.0.0.1:9000 --admin-listen 127.0.0.1:9100 --data .\data
 curl.exe -fsS http://127.0.0.1:9100/health/live
 curl.exe -fsS http://127.0.0.1:9100/health/ready
 curl.exe -fsS http://127.0.0.1:9100/version
+curl.exe -fsS http://127.0.0.1:9100/metrics
 .\build\windows-gcc-debug\boltstream-admin.exe topics create --topic trades --partitions 3
 .\build\windows-gcc-debug\boltstream-admin.exe topics describe --topic trades
 .\build\windows-gcc-debug\boltstream-producer.exe --topic trades --key AAPL --message "AAPL,100,192.41"
@@ -84,6 +99,7 @@ For a repeatable local smoke:
 .\scripts\smoke-phase6.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase7.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase8.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase9.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
 ```

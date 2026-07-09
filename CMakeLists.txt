@@ -64,6 +64,17 @@ if(NOT boost_headers_POPULATED)
   FetchContent_Populate(boost_headers)
 endif()
 
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  yaml_cpp
+  URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.9.0.tar.gz
+  URL_HASH SHA256=25cb043240f828a8c51beb830569634bc7ac603978e0f69d6b63558dadefd49a
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_MakeAvailable(yaml_cpp)
+
 add_library(boost_headers INTERFACE)
 target_include_directories(boost_headers SYSTEM INTERFACE "${boost_headers_SOURCE_DIR}")
 target_compile_definitions(boost_headers INTERFACE BOOST_ASIO_HEADER_ONLY BOOST_ASIO_NO_DEPRECATED)
@@ -92,6 +103,9 @@ add_library(boltstream_core
   src/broker/server.cpp
   src/client/async_client.cpp
   src/common/build_info.cpp
+  src/config/config.cpp
+  src/observability/logger.cpp
+  src/observability/metrics.cpp
   src/protocol/protocol.cpp
   src/storage/offset_store.cpp
   src/storage/partition_log.cpp)
@@ -105,7 +119,8 @@ target_link_libraries(boltstream_core
     boost_headers
     Threads::Threads
   PRIVATE
-    boltstream_warnings)
+    boltstream_warnings
+    yaml-cpp::yaml-cpp)
 if(WIN32)
   target_link_libraries(boltstream_core PUBLIC ws2_32 mswsock)
 endif()
@@ -152,7 +167,9 @@ if(BOLTSTREAM_BUILD_TESTS AND BUILD_TESTING)
   add_executable(boltstream_tests
     tests/build_info_tests.cpp
     tests/client_broker_tests.cpp
+    tests/config_tests.cpp
     tests/group_coordinator_tests.cpp
+    tests/metrics_tests.cpp
     tests/options_tests.cpp
     tests/protocol_tests.cpp
     tests/storage_tests.cpp)

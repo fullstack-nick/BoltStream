@@ -39,6 +39,7 @@ public:
   committed(std::string_view group, std::string_view topic, std::uint16_t partition) const;
   [[nodiscard]] std::vector<OffsetSnapshot> group_offsets(std::string_view group,
                                                           std::string_view topic) const;
+  [[nodiscard]] std::vector<OffsetSnapshot> all_offsets() const;
   void commit(std::string_view group, std::string_view topic, std::uint16_t partition,
               std::uint64_t next_offset);
   OffsetCleanupStats remove_topic(std::string_view topic);

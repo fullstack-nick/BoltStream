@@ -1,0 +1,69 @@
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="boltstream"}'
+        values: '0x8'
+      - series: 'boltstream_ready{job="boltstream"}'
+        values: '0x8'
+      - series: 'boltstream_rejected_requests_total{job="boltstream",operation="produce",reason="append_queue"}'
+        values: '0 1 2 3 4 5 6 7'
+      - series: 'boltstream_consumer_group_lag_records{job="boltstream",group="dashboard",topic="demo",partition="0"}'
+        values: '10001x8'
+      - series: 'boltstream_storage_available_bytes{job="boltstream"}'
+        values: '10x8'
+      - series: 'boltstream_storage_capacity_bytes{job="boltstream"}'
+        values: '100x8'
+      - series: 'boltstream_retention_failures_total{job="boltstream"}'
+        values: '0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BoltStreamBrokerDown
+        exp_alerts:
+          - exp_labels:
+              job: boltstream
+              severity: critical
+            exp_annotations:
+              summary: BoltStream scrape target is down
+      - eval_time: 3m
+        alertname: BoltStreamNotReady
+        exp_alerts:
+          - exp_labels:
+              job: boltstream
+              severity: critical
+            exp_annotations:
+              summary: BoltStream is live but not ready
+      - eval_time: 4m
+        alertname: BoltStreamAppendOverload
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: BoltStream append queue is rejecting produce requests
+      - eval_time: 6m
+        alertname: BoltStreamConsumerLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: A BoltStream consumer group is more than 10000 records behind
+      - eval_time: 6m
+        alertname: BoltStreamDiskNearlyFull
+        exp_alerts:
+          - exp_labels:
+              job: boltstream
+              severity: critical
+            exp_annotations:
+              summary: BoltStream data filesystem has less than 15 percent free
+      - eval_time: 3m
+        alertname: BoltStreamRetentionFailure
+        exp_alerts:
+          - exp_labels:
+              job: boltstream
+              severity: warning
+            exp_annotations:
+              summary: BoltStream retention failed

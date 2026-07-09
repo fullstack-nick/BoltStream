@@ -135,6 +135,17 @@ std::vector<OffsetSnapshot> OffsetStore::group_offsets(std::string_view group,
   return snapshots;
 }
 
+std::vector<OffsetSnapshot> OffsetStore::all_offsets() const {
+  std::vector<OffsetSnapshot> snapshots;
+  for (const auto& [group, offsets] : offsets_) {
+    for (const auto& [key, next_offset] : offsets) {
+      const auto& [topic, partition] = key;
+      snapshots.push_back({group, topic, partition, next_offset});
+    }
+  }
+  return snapshots;
+}
+
 void OffsetStore::commit(std::string_view group, std::string_view topic, std::uint16_t partition,
                          std::uint64_t next_offset) {
   if (!is_valid_group_name(group)) {

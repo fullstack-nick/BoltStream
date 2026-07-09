@@ -1,6 +1,8 @@
 FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
+ARG BOLTSTREAM_GIT_SHA=local-compose
+ENV BOLTSTREAM_GIT_SHA=${BOLTSTREAM_GIT_SHA}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -29,7 +31,9 @@ RUN cmake --preset linux-gcc-debug \
 
 FROM ubuntu:24.04 AS runtime
 
-RUN useradd --system --home /var/lib/boltstream --shell /usr/sbin/nologin boltstream \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/* \
+  && useradd --system --home /var/lib/boltstream --shell /usr/sbin/nologin boltstream \
   && mkdir -p /var/lib/boltstream /opt/boltstream \
   && chown -R boltstream:boltstream /var/lib/boltstream
 
@@ -38,8 +42,10 @@ COPY --from=builder /src/build/linux-gcc-release/boltstream-producer /usr/local/
 COPY --from=builder /src/build/linux-gcc-release/boltstream-consumer /usr/local/bin/boltstream-consumer
 COPY --from=builder /src/build/linux-gcc-release/boltstream-bench /usr/local/bin/boltstream-bench
 COPY --from=builder /src/build/linux-gcc-release/boltstream-logtool /usr/local/bin/boltstream-logtool
+COPY --from=builder /src/build/linux-gcc-release/boltstream-admin /usr/local/bin/boltstream-admin
+COPY config/boltstream.compose.yaml /etc/boltstream/boltstream.yaml
 
 EXPOSE 9000
 USER boltstream
 ENTRYPOINT ["boltstream-server"]
-CMD ["--listen", "0.0.0.0:9000", "--admin-listen", "127.0.0.1:9100", "--data", "/var/lib/boltstream"]
+CMD ["--config", "/etc/boltstream/boltstream.yaml"]

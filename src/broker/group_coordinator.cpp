@@ -292,6 +292,23 @@ void GroupCoordinator::remove_topic(std::string_view topic) {
   }
 }
 
+std::vector<GroupCoordinator::Snapshot> GroupCoordinator::snapshots(TimePoint now) const {
+  std::vector<Snapshot> result;
+  std::lock_guard lock{mutex_};
+  result.reserve(groups_.size());
+  for (const auto& [key, state] : groups_) {
+    std::size_t active = 0;
+    for (const auto& [_, member] : state.members) {
+      const auto timeout = std::chrono::milliseconds(member.session_timeout_ms);
+      if (now - member.last_heartbeat < timeout) {
+        ++active;
+      }
+    }
+    result.push_back({key.group, key.topic, state.generation_id, active});
+  }
+  return result;
+}
+
 GroupCoordinator::Result GroupCoordinator::make_result(const GroupState& state,
                                                        const MemberState* member) const {
   Result result;

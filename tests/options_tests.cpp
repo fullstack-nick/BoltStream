@@ -32,6 +32,9 @@ TEST(OptionsTests, DefaultsMatchCurrentContract) {
   EXPECT_EQ(parsed.options.retention_max_age_seconds, 604800U);
   EXPECT_EQ(parsed.options.retention_max_bytes, 1024ULL * 1024ULL * 1024ULL);
   EXPECT_EQ(parsed.options.retention_check_interval_ms, 60000U);
+  EXPECT_TRUE(parsed.options.metrics_enabled);
+  EXPECT_EQ(parsed.options.log_level, "info");
+  EXPECT_EQ(parsed.options.log_format, "json");
 }
 
 TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
@@ -134,4 +137,7 @@ TEST(OptionsTests, UsageDocumentsPhaseSixDefaults) {
   EXPECT_NE(usage.find("--segment-bytes 268435456"), std::string::npos);
   EXPECT_NE(usage.find("--retention-max-age-seconds 604800"), std::string::npos);
   EXPECT_NE(usage.find("--retention-max-bytes 1073741824"), std::string::npos);
+  EXPECT_NE(usage.find("compiled defaults < YAML config < explicit CLI flags"), std::string::npos);
+  EXPECT_NE(usage.find("--metrics-enabled true"), std::string::npos);
+  EXPECT_NE(usage.find("--log-level info"), std::string::npos);
 }

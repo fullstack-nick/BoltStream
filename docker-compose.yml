@@ -1,21 +1,106 @@
+name: boltstream
+
 services:
   boltstream:
+    image: boltstream:phase9-local
     build:
       context: .
       target: runtime
-    command:
-      - "--listen"
-      - "0.0.0.0:9000"
-      - "--admin-listen"
-      - "0.0.0.0:9100"
-      - "--data"
-      - "/var/lib/boltstream"
+      args:
+        BOLTSTREAM_GIT_SHA: ${BOLTSTREAM_GIT_SHA:-local-compose}
+    environment:
+      BOLTSTREAM_BROKER_TOKEN: local-demo-token
+    command: ["--config", "/etc/boltstream/boltstream.yaml"]
     ports:
-      - "9000:9000"
-      - "9100:9100"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9100:9100"
     volumes:
       - boltstream-data:/var/lib/boltstream
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9100/health/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    restart: unless-stopped
+
+  topic-init:
+    image: boltstream:phase9-local
+    pull_policy: never
+    entrypoint: ["boltstream-admin"]
+    command: ["topics", "create", "--host", "boltstream", "--port", "9000", "--topic", "demo", "--partitions", "1"]
+    environment:
+      BOLTSTREAM_BROKER_TOKEN: local-demo-token
+    depends_on:
+      boltstream:
+        condition: service_healthy
+    restart: "no"
+
+  producer:
+    image: boltstream:phase9-local
+    pull_policy: never
+    entrypoint: ["/bin/bash", "-lc"]
+    command: ["for i in $$(seq 1 25); do boltstream-producer --host boltstream --port 9000 --topic demo --key \"key-$${i}\" --message \"metric-demo-$${i}\" >/dev/null || exit 1; done"]
+    environment:
+      BOLTSTREAM_BROKER_TOKEN: local-demo-token
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  consumer:
+    image: boltstream:phase9-local
+    pull_policy: never
+    entrypoint: ["boltstream-consumer"]
+    command: ["--host", "boltstream", "--port", "9000", "--topic", "demo", "--group", "dashboard", "--from", "beginning", "--commit"]
+    environment:
+      BOLTSTREAM_BROKER_TOKEN: local-demo-token
+    depends_on:
+      producer:
+        condition: service_completed_successfully
+    restart: "no"
+
+  prometheus:
+    image: prom/prometheus@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=24h"
+      - "--web.enable-lifecycle"
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./deployments/metrics/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deployments/metrics/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      boltstream:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/bin/promtool", "check", "healthy", "--url=http://127.0.0.1:9090"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: light
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./deployments/metrics/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deployments/metrics/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   boltstream-data:
-
+  prometheus-data:
+  grafana-data:
