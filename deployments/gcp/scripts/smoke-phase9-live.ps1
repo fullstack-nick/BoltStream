@@ -93,6 +93,7 @@ $TunnelOut = Join-Path $env:TEMP "boltstream-phase9-tunnel.out"
 $TunnelErr = Join-Path $env:TEMP "boltstream-phase9-tunnel.err"
 Remove-Item -Force -LiteralPath $TunnelOut, $TunnelErr -ErrorAction SilentlyContinue
 $tunnel = $null
+$PowerShellExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 
 $CleanupScript = @'
 #!/usr/bin/env bash
@@ -109,7 +110,7 @@ exit 1
 '@
 
 try {
-  $tunnel = Start-Process -FilePath "pwsh.exe" -ArgumentList @(
+  $tunnel = Start-Process -FilePath $PowerShellExe -ArgumentList @(
     "-NoProfile", "-File", $TunnelScript, "-ProjectId", $ProjectId, "-Zone", $Zone,
     "-InstanceName", $InstanceName, "-LocalPort", "$TunnelPort"
   ) -PassThru -WindowStyle Hidden -RedirectStandardOutput $TunnelOut -RedirectStandardError $TunnelErr
