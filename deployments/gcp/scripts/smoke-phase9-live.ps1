@@ -115,12 +115,18 @@ try {
     "-InstanceName", $InstanceName, "-LocalPort", "$TunnelPort"
   ) -PassThru -WindowStyle Hidden -RedirectStandardOutput $TunnelOut -RedirectStandardError $TunnelErr
   $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+  $tunnelReady = $false
   do {
-    & curl.exe -fsS "http://127.0.0.1:$TunnelPort/health/ready" 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) { break }
+    try {
+      Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 `
+        -Uri "http://127.0.0.1:$TunnelPort/health/ready" | Out-Null
+      $tunnelReady = $true
+      break
+    } catch {
+    }
     Start-Sleep -Milliseconds 250
   } while ([DateTimeOffset]::UtcNow -lt $deadline)
-  if ($LASTEXITCODE -ne 0) {
+  if (-not $tunnelReady) {
     $errorText = if (Test-Path $TunnelErr) { Get-Content -Raw $TunnelErr } else { "" }
     throw "Metrics tunnel did not become ready: $errorText"
   }
@@ -234,7 +240,11 @@ journalctl -u boltstream.service -o cat -n 100 --no-pager | grep '"error_code":"
 } finally {
   try { Invoke-RemoteScript $CleanupScript "boltstream-phase9-final-cleanup" | Out-Null } catch { Write-Warning $_ }
   if ($tunnel -and -not $tunnel.HasExited) {
-    Stop-Process -Id $tunnel.Id -Force -ErrorAction SilentlyContinue
+    $stopTree = Start-Process -FilePath "taskkill.exe" `
+      -ArgumentList @("/PID", "$($tunnel.Id)", "/T", "/F") -PassThru -Wait -WindowStyle Hidden
+    if ($stopTree.ExitCode -ne 0 -and -not $tunnel.HasExited) {
+      Stop-Process -Id $tunnel.Id -Force -ErrorAction SilentlyContinue
+    }
     $tunnel.WaitForExit()
   }
   if ($HadToken) { $env:BOLTSTREAM_BROKER_TOKEN = $PreviousToken } else { Remove-Item Env:\BOLTSTREAM_BROKER_TOKEN -ErrorAction SilentlyContinue }

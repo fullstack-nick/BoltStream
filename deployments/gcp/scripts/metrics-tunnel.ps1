@@ -28,7 +28,9 @@ Write-Host "Keep this process running while Prometheus or curl inspects the live
   --strict-host-key-checking=no `
   --project $ProjectId `
   --zone $Zone `
-  -- -N -o ExitOnForwardFailure=yes -L "127.0.0.1:${LocalPort}:127.0.0.1:9100"
+  --ssh-flag=-N `
+  --ssh-flag=-L `
+  --ssh-flag="127.0.0.1:${LocalPort}:127.0.0.1:9100"
 if ($LASTEXITCODE -ne 0) {
   throw "Metrics SSH tunnel exited with code $LASTEXITCODE."
 }
