@@ -218,7 +218,9 @@ std::string os_description() {
 #if defined(_WIN32)
   return "Windows";
 #else
-  struct utsname name{};
+  // clang-format off
+  struct utsname name {};
+  // clang-format on
   if (uname(&name) == 0) {
     return std::string{name.sysname} + " " + name.release;
   }
@@ -232,7 +234,9 @@ std::uint64_t memory_bytes() {
   status.dwLength = sizeof(status);
   return GlobalMemoryStatusEx(&status) ? status.ullTotalPhys : 0;
 #else
-  struct sysinfo info{};
+  // clang-format off
+  struct sysinfo info {};
+  // clang-format on
   return sysinfo(&info) == 0
              ? static_cast<std::uint64_t>(info.totalram) * static_cast<std::uint64_t>(info.mem_unit)
              : 0;

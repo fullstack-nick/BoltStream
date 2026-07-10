@@ -125,7 +125,7 @@ jobs:
           cmake -S . -B build/linux-tsan -G Ninja
           -DCMAKE_BUILD_TYPE=Debug
           -DBOLTSTREAM_BUILD_BENCHMARKS=OFF
-          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -Wno-error=tsan"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
 
       - name: Build focused tests
