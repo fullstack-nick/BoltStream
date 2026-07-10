@@ -48,9 +48,12 @@ if ($LASTEXITCODE -ne 0 -or ($Version -join "`n") -notmatch [regex]::Escape($Git
 }
 
 foreach ($Profile in $Profiles.GetEnumerator()) {
-  $RemoteConfig = "/tmp/phase10-$($Profile.Key).yaml"
-  & $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $Profile.Value.Config "${InstanceName}:$RemoteConfig"
+  $RemoteStaging = "/tmp/phase10-$($Profile.Key).yaml"
+  $RemoteConfig = "/etc/boltstream/phase10-$($Profile.Key).yaml"
+  & $Gcloud compute scp --strict-host-key-checking=no --project $ProjectId --zone $Zone $Profile.Value.Config "${InstanceName}:$RemoteStaging"
   if ($LASTEXITCODE -ne 0) { throw "Failed to upload profile $($Profile.Key)." }
+  & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "sudo install -o root -g boltstream -m 0640 $RemoteStaging $RemoteConfig; rm -f $RemoteStaging"
+  if ($LASTEXITCODE -ne 0) { throw "Failed to install profile $($Profile.Key)." }
 }
 
 try {
@@ -74,7 +77,7 @@ set -euo pipefail
 PROFILE='$ProfileName'
 ROUND='$Round'
 SHA='$GitSha'
-CONFIG='/tmp/phase10-$ProfileName.yaml'
+CONFIG='/etc/boltstream/phase10-$ProfileName.yaml'
 DATA='/var/lib/boltstream/phase10-$ProfileName-r$Round'
 DROPIN='/etc/systemd/system/boltstream.service.d/phase10-benchmark.conf'
 
@@ -167,15 +170,15 @@ curl -fsS http://127.0.0.1:9100/health/ready >/dev/null
         Write-Host "GCP Phase 10 round $Round passed: $ProfileName"
       } finally {
         Remove-Item -Force -LiteralPath $LocalScript -ErrorAction SilentlyContinue
-        & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "rm -f $RemoteScript $RemotePrefix-*.json" | Out-Null
+        & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "sudo rm -f $RemoteScript $RemotePrefix-*.json" | Out-Null
       }
     }
   }
 } finally {
-  & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "sudo rm -f /etc/systemd/system/boltstream.service.d/phase10-benchmark.conf; sudo systemctl daemon-reload; sudo systemctl restart boltstream.service; rm -f /tmp/phase10-*.yaml /tmp/phase10-*.sh /tmp/phase10-*.json; sudo rm -rf /var/lib/boltstream/phase10-*" | Out-Null
+  & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "sudo rm -f /etc/systemd/system/boltstream.service.d/phase10-benchmark.conf /etc/boltstream/phase10-*.yaml; sudo systemctl daemon-reload; sudo systemctl restart boltstream.service; sudo rm -f /tmp/phase10-*.yaml /tmp/phase10-*.sh /tmp/phase10-*.json; sudo rm -rf /var/lib/boltstream/phase10-*" | Out-Null
 }
 
-$Final = & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "systemctl is-active boltstream.service; curl -fsS http://127.0.0.1:9100/health/ready; curl -fsS http://127.0.0.1:9100/version"
+$Final = & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no --project $ProjectId --zone $Zone --command "systemctl is-active boltstream.service; test ! -e /etc/systemd/system/boltstream.service.d/phase10-benchmark.conf; if sudo find /etc/boltstream /tmp /var/lib/boltstream -maxdepth 1 -name 'phase10-*' -print -quit | grep -q .; then exit 1; fi; curl -fsS http://127.0.0.1:9100/health/ready; curl -fsS http://127.0.0.1:9100/version"
 if ($LASTEXITCODE -ne 0 -or ($Final -join "`n") -notmatch [regex]::Escape($GitSha)) {
   throw "Normal BoltStream service was not restored after the live benchmark."
 }
