@@ -2455,8 +2455,9 @@ std::string utc_now_iso8601() {
 BrokerServer::BrokerServer(ServerOptions options, BuildInfo build_info)
     : options_(std::move(options)), build_info_(std::move(build_info)),
       startup_time_utc_(utc_now_iso8601()), startup_monotonic_(std::chrono::steady_clock::now()),
-      io_(static_cast<int>(options_.io_workers)), broker_acceptor_(io_), admin_acceptor_(io_),
-      retention_timer_(io_), metrics_(options_.metrics_enabled),
+      io_(static_cast<int>(options_.io_workers)), server_strand_(boost::asio::make_strand(io_)),
+      broker_acceptor_(io_), admin_acceptor_(io_), retention_timer_(io_),
+      metrics_(options_.metrics_enabled),
       runtime_(
           std::make_unique<BrokerRuntime>(options_, broker_token_from_environment(), metrics_)) {
   observability::configure_logging(observability::parse_log_level(options_.log_level),
@@ -2500,31 +2501,34 @@ void BrokerServer::stop() {
   }
   ready_ = false;
   set_ready_detail("shutting down");
-  boost::system::error_code ignored;
-  broker_acceptor_.close(ignored);
-  admin_acceptor_.close(ignored);
-  retention_timer_.cancel();
-  io_.stop();
+  boost::asio::dispatch(server_strand_, [this] {
+    boost::system::error_code ignored;
+    broker_acceptor_.close(ignored);
+    admin_acceptor_.close(ignored);
+    retention_timer_.cancel();
+    io_.stop();
+  });
 }
 
 void BrokerServer::wait_for_shutdown_signal() {
   boost::asio::signal_set signals(io_, SIGINT, SIGTERM);
-  signals.async_wait([this](const boost::system::error_code& error, int signal_number) {
-    if (!error) {
-      write_structured_log({"info",
-                            "server_shutdown_signal",
-                            {},
-                            {},
-                            {},
-                            "signal=" + std::to_string(signal_number),
-                            std::nullopt,
-                            std::nullopt,
-                            std::nullopt,
-                            std::nullopt,
-                            runtime_->active_long_poll_waiters()});
-      stop();
-    }
-  });
+  signals.async_wait(boost::asio::bind_executor(
+      server_strand_, [this](const boost::system::error_code& error, int signal_number) {
+        if (!error) {
+          write_structured_log({"info",
+                                "server_shutdown_signal",
+                                {},
+                                {},
+                                {},
+                                "signal=" + std::to_string(signal_number),
+                                std::nullopt,
+                                std::nullopt,
+                                std::nullopt,
+                                std::nullopt,
+                                runtime_->active_long_poll_waiters()});
+          stop();
+        }
+      }));
   std::vector<std::thread> workers;
   workers.reserve(options_.io_workers - 1);
   for (std::uint32_t index = 1; index < options_.io_workers; ++index) {
@@ -2624,81 +2628,86 @@ void BrokerServer::schedule_retention() {
     return;
   }
   retention_timer_.expires_after(std::chrono::milliseconds(options_.retention_check_interval_ms));
-  retention_timer_.async_wait([this](const boost::system::error_code& ec) {
-    if (ec || stopping_) {
-      return;
-    }
-    try {
-      (void)runtime_->run_retention({});
-    } catch (const std::exception& error) {
-      metrics_.record_retention_failure();
-      write_structured_log(
-          {"error",
-           "retention_failed",
-           {},
-           {},
-           std::string{protocol::error_code_name(protocol::ErrorCode::InternalError)},
-           error.what(),
-           std::nullopt,
-           std::nullopt,
-           std::nullopt,
-           std::nullopt,
-           runtime_->active_long_poll_waiters()});
-    }
-    schedule_retention();
-  });
+  retention_timer_.async_wait(
+      boost::asio::bind_executor(server_strand_, [this](const boost::system::error_code& ec) {
+        if (ec || stopping_) {
+          return;
+        }
+        try {
+          (void)runtime_->run_retention({});
+        } catch (const std::exception& error) {
+          metrics_.record_retention_failure();
+          write_structured_log(
+              {"error",
+               "retention_failed",
+               {},
+               {},
+               std::string{protocol::error_code_name(protocol::ErrorCode::InternalError)},
+               error.what(),
+               std::nullopt,
+               std::nullopt,
+               std::nullopt,
+               std::nullopt,
+               runtime_->active_long_poll_waiters()});
+        }
+        schedule_retention();
+      }));
 }
 
 void BrokerServer::accept_broker_client() {
   auto socket = std::make_shared<Tcp::socket>(io_);
-  broker_acceptor_.async_accept(*socket, [this, socket](const boost::system::error_code& ec) {
-    if (ec) {
-      if (broker_acceptor_.is_open() && ec != boost::asio::error::operation_aborted) {
-        write_structured_log({"error",
-                              "broker_accept_error",
-                              {},
-                              {},
-                              {},
-                              ec.message(),
-                              std::nullopt,
-                              std::nullopt,
-                              std::nullopt,
-                              std::nullopt,
-                              runtime_->active_long_poll_waiters()});
-      }
-      return;
-    }
-    handle_broker_client(std::move(*socket));
-    if (broker_acceptor_.is_open()) {
-      accept_broker_client();
-    }
-  });
+  broker_acceptor_.async_accept(
+      *socket, boost::asio::bind_executor(server_strand_, [this, socket](
+                                                              const boost::system::error_code& ec) {
+        if (ec) {
+          if (broker_acceptor_.is_open() && ec != boost::asio::error::operation_aborted) {
+            write_structured_log({"error",
+                                  "broker_accept_error",
+                                  {},
+                                  {},
+                                  {},
+                                  ec.message(),
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  runtime_->active_long_poll_waiters()});
+          }
+          return;
+        }
+        handle_broker_client(std::move(*socket));
+        if (broker_acceptor_.is_open()) {
+          accept_broker_client();
+        }
+      }));
 }
 
 void BrokerServer::accept_admin_client() {
   auto socket = std::make_shared<Tcp::socket>(io_);
-  admin_acceptor_.async_accept(*socket, [this, socket](const boost::system::error_code& ec) {
-    if (ec) {
-      if (admin_acceptor_.is_open() && ec != boost::asio::error::operation_aborted) {
-        write_structured_log({"error",
-                              "admin_accept_error",
-                              {},
-                              {},
-                              {},
-                              ec.message(),
-                              std::nullopt,
-                              std::nullopt,
-                              std::nullopt,
-                              std::nullopt,
-                              runtime_->active_long_poll_waiters()});
-      }
-      return;
-    }
-    handle_admin_client(std::move(*socket));
-    if (admin_acceptor_.is_open()) {
-      accept_admin_client();
-    }
-  });
+  admin_acceptor_.async_accept(
+      *socket, boost::asio::bind_executor(server_strand_, [this, socket](
+                                                              const boost::system::error_code& ec) {
+        if (ec) {
+          if (admin_acceptor_.is_open() && ec != boost::asio::error::operation_aborted) {
+            write_structured_log({"error",
+                                  "admin_accept_error",
+                                  {},
+                                  {},
+                                  {},
+                                  ec.message(),
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  runtime_->active_long_poll_waiters()});
+          }
+          return;
+        }
+        handle_admin_client(std::move(*socket));
+        if (admin_acceptor_.is_open()) {
+          accept_admin_client();
+        }
+      }));
 }
 
 void BrokerServer::handle_broker_client(Tcp::socket socket) {

@@ -63,6 +63,7 @@ private:
   std::string ready_detail_{"starting"};
 
   boost::asio::io_context io_;
+  boost::asio::strand<boost::asio::any_io_executor> server_strand_;
   Tcp::acceptor broker_acceptor_;
   Tcp::acceptor admin_acceptor_;
   boost::asio::steady_timer retention_timer_;

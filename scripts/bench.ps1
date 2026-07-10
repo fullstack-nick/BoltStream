@@ -3,6 +3,13 @@ param(
   [ValidateSet("all", "single-threaded", "worker-event-loops", "batched-writes")]
   [string]$Profile = "all",
   [string]$OutputDir = "artifacts/benchmarks/local",
+  [int]$MeasuredSeconds = 30,
+  [int]$WarmupSeconds = 60,
+  [uint64]$LatencyMessages = 100000,
+  [uint64]$FetchRecords = 250000,
+  [uint64]$WarmupMessages = 10000,
+  [int]$Repetitions = 3,
+  [int]$Clients = 16,
   [switch]$Quick,
   [switch]$SkipBuild
 )
@@ -33,13 +40,19 @@ if ($Profile -ne "all") {
   $Profiles = $Selected
 }
 
-$Duration = if ($Quick) { 1 } else { 30 }
-$WarmupSeconds = if ($Quick) { 0 } else { 60 }
-$Messages = if ($Quick) { 400 } else { 100000 }
-$FetchMessages = if ($Quick) { 400 } else { 250000 }
-$WarmupMessages = if ($Quick) { 20 } else { 10000 }
-$Repetitions = if ($Quick) { 1 } else { 3 }
-$Clients = if ($Quick) { 8 } else { 16 }
+if ($Quick) {
+  $MeasuredSeconds = 1
+  $WarmupSeconds = 0
+  $LatencyMessages = 400
+  $FetchRecords = 400
+  $WarmupMessages = 20
+  $Repetitions = 1
+  $Clients = 8
+}
+if ($MeasuredSeconds -lt 1 -or $WarmupSeconds -lt 0 -or $LatencyMessages -lt 1 -or
+    $FetchRecords -lt 1 -or $Repetitions -lt 1 -or $Clients -lt 1) {
+  throw "Benchmark workload controls must be positive; warmup seconds may be zero."
+}
 $EnvironmentKind = if ($RunningOnWindows) { "native-windows" } else { "native-linux" }
 $MachineType = if ($RunningOnWindows) { "developer-laptop" } else { "developer-host" }
 $Port = 19010
@@ -54,7 +67,7 @@ try {
   foreach ($Entry in $Profiles.GetEnumerator()) {
     $Name = $Entry.Key
     $Metadata = $Entry.Value
-    $TempRoot = Join-Path $env:TEMP ("boltstream-phase10-$Name-" + [guid]::NewGuid())
+    $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("boltstream-phase10-$Name-" + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $TempRoot | Out-Null
     $Stdout = Join-Path $TempRoot "server.stdout.log"
     $Stderr = Join-Path $TempRoot "server.stderr.log"
@@ -101,7 +114,7 @@ try {
       }
 
       foreach ($Workload in @("produce-throughput", "produce-latency", "fetch-throughput")) {
-        $WorkloadMessages = if ($Workload -eq "fetch-throughput") { $FetchMessages } else { $Messages }
+        $WorkloadMessages = if ($Workload -eq "fetch-throughput") { $FetchRecords } else { $LatencyMessages }
         $Json = Join-Path $OutputDir "$Name-$Workload.json"
         $Markdown = Join-Path $OutputDir "$Name-$Workload.md"
         $Arguments = @(
@@ -109,7 +122,7 @@ try {
           "--host", "127.0.0.1", "--port", "$Port", "--admin-port", "$AdminPort",
           "--profile", $Name, "--environment", $EnvironmentKind, "--machine-type", $MachineType,
           "--partitions", "4", "--clients", "$Clients",
-          "--duration-seconds", "$Duration", "--warmup-seconds", "$WarmupSeconds",
+          "--duration-seconds", "$MeasuredSeconds", "--warmup-seconds", "$WarmupSeconds",
           "--messages", "$WorkloadMessages", "--warmup-messages", "$WarmupMessages",
           "--payload-bytes", "256", "--key-bytes", "16", "--repetitions", "$Repetitions",
           "--server-io-workers", "$($Metadata.Io)",
