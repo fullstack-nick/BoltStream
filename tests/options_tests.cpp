@@ -17,7 +17,9 @@ TEST(OptionsTests, DefaultsMatchCurrentContract) {
   EXPECT_EQ(parsed.options.listen.port, 9000);
   EXPECT_EQ(parsed.options.admin_listen.host, "127.0.0.1");
   EXPECT_EQ(parsed.options.admin_listen.port, 9100);
+  EXPECT_EQ(parsed.options.io_workers, 1U);
   EXPECT_EQ(parsed.options.data_dir.generic_string(), "./data");
+  EXPECT_EQ(parsed.options.append_batch_records, 1U);
   EXPECT_EQ(parsed.options.max_frame_bytes, 1024U * 1024U);
   EXPECT_EQ(parsed.options.max_fetch_records, 100U);
   EXPECT_EQ(parsed.options.max_fetch_bytes, 1024U * 1024U);
@@ -45,6 +47,8 @@ TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
       std::string_view{"127.0.0.1:9101"},
       std::string_view{"--data"},
       std::string_view{"./tmp-data"},
+      std::string_view{"--io-workers"},
+      std::string_view{"4"},
       std::string_view{"--max-frame-bytes"},
       std::string_view{"4096"},
       std::string_view{"--max-fetch-records"},
@@ -59,6 +63,8 @@ TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
       std::string_view{"0"},
       std::string_view{"--append-workers"},
       std::string_view{"4"},
+      std::string_view{"--append-batch-records"},
+      std::string_view{"32"},
       std::string_view{"--max-broker-connections"},
       std::string_view{"16"},
       std::string_view{"--max-long-poll-waiters"},
@@ -82,7 +88,9 @@ TEST(OptionsTests, ParsesListenAdminPortDataAndLimits) {
   EXPECT_EQ(parsed.options.listen.port, 9001);
   EXPECT_EQ(parsed.options.admin_listen.host, "127.0.0.1");
   EXPECT_EQ(parsed.options.admin_listen.port, 9101);
+  EXPECT_EQ(parsed.options.io_workers, 4U);
   EXPECT_EQ(parsed.options.data_dir.generic_string(), "./tmp-data");
+  EXPECT_EQ(parsed.options.append_batch_records, 32U);
   EXPECT_EQ(parsed.options.max_frame_bytes, 4096U);
   EXPECT_EQ(parsed.options.max_fetch_records, 12U);
   EXPECT_EQ(parsed.options.max_fetch_bytes, 2048U);
@@ -118,13 +126,17 @@ TEST(OptionsTests, RejectsInvalidPort) {
   EXPECT_NE(parsed.error.find("invalid --port"), std::string::npos);
 }
 
-TEST(OptionsTests, RejectsZeroAppendWorkers) {
-  constexpr std::array args{std::string_view{"--append-workers"}, std::string_view{"0"}};
+TEST(OptionsTests, AcceptsInlineAppendProfileAndRejectsInvalidCombinations) {
+  constexpr std::array inline_args{std::string_view{"--append-workers"}, std::string_view{"0"}};
+  const auto inline_result = parse_server_options(inline_args);
+  ASSERT_TRUE(inline_result.ok()) << inline_result.error;
 
-  const auto parsed = parse_server_options(args);
+  constexpr std::array invalid_args{std::string_view{"--append-workers"}, std::string_view{"0"},
+                                    std::string_view{"--io-workers"}, std::string_view{"2"}};
+  const auto invalid_result = parse_server_options(invalid_args);
 
-  EXPECT_FALSE(parsed.ok());
-  EXPECT_NE(parsed.error.find("invalid --append-workers"), std::string::npos);
+  EXPECT_FALSE(invalid_result.ok());
+  EXPECT_NE(invalid_result.error.find("requires --io-workers 1"), std::string::npos);
 }
 
 TEST(OptionsTests, UsageDocumentsPhaseSixDefaults) {
@@ -132,6 +144,8 @@ TEST(OptionsTests, UsageDocumentsPhaseSixDefaults) {
 
   EXPECT_NE(usage.find("--max-append-queue-depth 32"), std::string::npos);
   EXPECT_NE(usage.find("--append-workers 2"), std::string::npos);
+  EXPECT_NE(usage.find("--io-workers 1"), std::string::npos);
+  EXPECT_NE(usage.find("--append-batch-records 1"), std::string::npos);
   EXPECT_NE(usage.find("--max-broker-connections 128"), std::string::npos);
   EXPECT_NE(usage.find("--max-long-poll-waiters 128"), std::string::npos);
   EXPECT_NE(usage.find("--segment-bytes 268435456"), std::string::npos);

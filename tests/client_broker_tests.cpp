@@ -1328,7 +1328,12 @@ TEST(ClientBrokerTests, ConfiguredAuthIsRequiredAndAccepted) {
 }
 
 TEST(ClientBrokerTests, ConcurrentProducersAssignUniqueOffsets) {
-  const auto running = start_server();
+  const auto running = start_server({}, [](auto& options) {
+    options.io_workers = 2;
+    options.append_workers = 2;
+    options.append_batch_records = 32;
+    options.max_append_queue_depth = 1024;
+  });
   boost::system::error_code setup_error;
   bool setup_timed_out = false;
   auto created = create_topic(running->port, "trades", 1, setup_error, setup_timed_out);
@@ -1440,6 +1445,12 @@ TEST(ClientBrokerTests, ConcurrentProducersAssignUniqueOffsets) {
       boltstream::protocol::decode_fetch_response(fetch_frame.payload, fetch_response);
   ASSERT_TRUE(decoded.ok) << decoded.message;
   EXPECT_EQ(fetch_response.records.size(), static_cast<std::size_t>(kProducerCount));
+
+  const auto metrics = admin_request(
+      running->admin_port, "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+  EXPECT_NE(metrics.find("boltstream_runtime_io_workers 2"), std::string::npos);
+  EXPECT_NE(metrics.find("boltstream_runtime_append_workers 2"), std::string::npos);
+  EXPECT_NE(metrics.find("boltstream_append_batch_records_count "), std::string::npos);
 }
 
 TEST(ClientBrokerTests, MultipleConcurrentRequestsPreserveCorrelationIds) {
@@ -1483,7 +1494,9 @@ TEST(ClientBrokerTests, MultipleConcurrentRequestsPreserveCorrelationIds) {
     client.async_metadata(complete);
     client.async_fetch("trades", 0, "latest", "", 0, complete);
   });
+  std::thread second_io_thread([&io] { io.run(); });
   io.run();
+  second_io_thread.join();
 
   ASSERT_FALSE(timed_out);
   ASSERT_EQ(frames.size(), 3U);

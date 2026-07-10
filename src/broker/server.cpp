@@ -257,6 +257,7 @@ public:
         max_fetch_wait_ms_(options.max_fetch_wait_ms),
         max_append_queue_depth_(options.max_append_queue_depth),
         append_workers_configured_(options.append_workers),
+        append_batch_records_(options.append_batch_records),
         max_long_poll_waiters_(options.max_long_poll_waiters),
         segment_bytes_(options.segment_bytes),
         segment_max_age_seconds_(options.segment_max_age_seconds),
@@ -434,6 +435,18 @@ public:
                                   ? topic->next_round_robin_partition
                                   : key_hash_partition(job->request.key, topic->partition_count);
     auto partition = topic->partitions.at(partition_id);
+    if (append_workers_configured_ == 0) {
+      auto results = run_append_batch(partition, {job});
+      boost::asio::post(job->executor, [completion = std::move(job->completion),
+                                        result = std::move(results.front())]() mutable {
+        completion(std::move(result));
+      });
+      if (job->request.key.empty()) {
+        topic->next_round_robin_partition = static_cast<std::uint16_t>(
+            (topic->next_round_robin_partition + 1U) % topic->partition_count);
+      }
+      return;
+    }
     const auto enqueued = try_enqueue_append(partition, job);
     if (!enqueued.accepted) {
       metrics_.record_rejection(protocol::FrameType::ProduceRequest,
@@ -1095,29 +1108,53 @@ private:
         job = std::move(ready.job);
       }
 
-      auto result = run_append(partition, *job);
-      boost::asio::post(job->executor,
-                        [completion = std::move(job->completion),
-                         result = std::move(result)]() mutable { completion(std::move(result)); });
+      std::vector<std::shared_ptr<AppendJob>> jobs;
+      jobs.reserve(append_batch_records_);
+      jobs.push_back(std::move(job));
+      {
+        std::lock_guard lock{partition->append_mutex};
+        while (jobs.size() < append_batch_records_ && !partition->pending_appends.empty()) {
+          jobs.push_back(std::move(partition->pending_appends.front()));
+          partition->pending_appends.pop_front();
+        }
+      }
+      auto results = run_append_batch(partition, jobs);
+      for (std::size_t index = 0; index < jobs.size(); ++index) {
+        auto current = std::move(jobs[index]);
+        boost::asio::post(current->executor, [completion = std::move(current->completion),
+                                              result = std::move(results[index])]() mutable {
+          completion(std::move(result));
+        });
+      }
       complete_append(partition);
     }
   }
 
-  ProduceResult run_append(const std::shared_ptr<TopicState::PartitionState>& partition,
-                           const AppendJob& job) {
-    ProduceResult result;
+  std::vector<ProduceResult>
+  run_append_batch(const std::shared_ptr<TopicState::PartitionState>& partition,
+                   const std::vector<std::shared_ptr<AppendJob>>& jobs) {
+    std::vector<ProduceResult> results(jobs.size());
     bool append_completed = false;
     try {
       std::lock_guard log_lock{partition->log_mutex};
-      const auto metadata = partition->log.append(job.request.key, job.request.message);
+      std::vector<storage::AppendRecord> records;
+      records.reserve(jobs.size());
+      for (const auto& job : jobs) {
+        records.push_back({job->request.key, job->request.message});
+      }
+      const auto metadata = partition->log.append_batch(records);
       append_completed = true;
-      result.ok = true;
-      result.response.topic = metadata.topic;
-      result.response.partition = metadata.partition;
-      result.response.offset = metadata.offset;
-      result.response.next_offset = partition->log.next_offset();
-      result.response.encoded_byte_size = metadata.encoded_byte_size;
-      metrics_.record_records_produced(1);
+      for (std::size_t index = 0; index < metadata.size(); ++index) {
+        auto& result = results[index];
+        result.ok = true;
+        result.response.topic = metadata[index].topic;
+        result.response.partition = metadata[index].partition;
+        result.response.offset = metadata[index].offset;
+        result.response.next_offset = metadata[index].offset + 1;
+        result.response.encoded_byte_size = metadata[index].encoded_byte_size;
+      }
+      metrics_.record_records_produced(metadata.size());
+      metrics_.record_append_batch(metadata.size());
       const auto retention = partition->log.apply_retention(retention_policy_);
       metrics_.record_retention_run(retention.segments_deleted, retention.bytes_deleted);
       if (retention.segments_deleted > 0) {
@@ -1132,27 +1169,29 @@ private:
       if (append_completed) {
         metrics_.record_retention_failure();
       }
-      result.ok = false;
-      result.error = protocol::ErrorCode::InternalError;
-      result.message = error.what();
+      for (auto& result : results) {
+        result.ok = false;
+        result.error = protocol::ErrorCode::InternalError;
+        result.message = error.what();
+      }
     }
 
-    if (result.ok) {
-      notify_fetch_waiters(result.response.topic, result.response.partition);
+    if (!results.empty() && results.front().ok) {
+      notify_fetch_waiters(results.front().response.topic, results.front().response.partition);
     } else {
       write_structured_log({"error",
                             "append_failed",
                             {},
                             {},
-                            std::string{protocol::error_code_name(result.error)},
-                            result.message,
+                            std::string{protocol::error_code_name(results.front().error)},
+                            results.front().message,
                             std::nullopt,
                             std::nullopt,
-                            protocol::is_retryable_error(result.error),
+                            protocol::is_retryable_error(results.front().error),
                             std::nullopt,
                             active_long_poll_waiters()});
     }
-    return result;
+    return results;
   }
 
   void complete_append(const std::shared_ptr<TopicState::PartitionState>& partition) {
@@ -1428,6 +1467,7 @@ private:
   std::uint32_t max_fetch_wait_ms_;
   std::uint32_t max_append_queue_depth_;
   std::uint32_t append_workers_configured_;
+  std::uint32_t append_batch_records_;
   std::uint32_t max_long_poll_waiters_;
   std::uintmax_t segment_bytes_;
   std::uint64_t segment_max_age_seconds_;
@@ -1512,7 +1552,8 @@ public:
   BrokerProtocolSession(Tcp::socket socket, BrokerRuntime& runtime,
                         observability::MetricsRegistry& metrics, std::function<bool()> ready,
                         std::function<std::string()> ready_detail, std::function<void()> on_close)
-      : socket_(std::move(socket)), runtime_(runtime), metrics_(metrics), ready_(std::move(ready)),
+      : socket_(std::move(socket)), strand_(boost::asio::make_strand(socket_.get_executor())),
+        runtime_(runtime), metrics_(metrics), ready_(std::move(ready)),
         ready_detail_(std::move(ready_detail)), on_close_(std::move(on_close)),
         authenticated_(!runtime_.auth_required()) {
     boost::system::error_code ec;
@@ -1529,14 +1570,18 @@ public:
     }
   }
 
-  void start() { read_header(); }
+  void start() {
+    auto self = shared_from_this();
+    boost::asio::dispatch(strand_, [this, self] { read_header(); });
+  }
 
 private:
   void read_header() {
     auto self = shared_from_this();
     boost::asio::async_read(
         socket_, boost::asio::buffer(header_buffer_),
-        [this, self](const boost::system::error_code& ec, std::size_t) {
+        boost::asio::bind_executor(strand_, [this, self](const boost::system::error_code& ec,
+                                                         std::size_t) {
           if (ec) {
             return;
           }
@@ -1549,24 +1594,25 @@ private:
             return;
           }
           read_payload(decoded.header);
-        });
+        }));
   }
 
   void read_payload(protocol::FrameHeader header) {
     auto self = shared_from_this();
     payload_buffer_.assign(header.payload_bytes, 0);
-    boost::asio::async_read(
-        socket_, boost::asio::buffer(payload_buffer_),
-        [this, self, header](const boost::system::error_code& ec, std::size_t) mutable {
-          if (ec) {
-            return;
-          }
+    boost::asio::async_read(socket_, boost::asio::buffer(payload_buffer_),
+                            boost::asio::bind_executor(
+                                strand_, [this, self, header](const boost::system::error_code& ec,
+                                                              std::size_t) mutable {
+                                  if (ec) {
+                                    return;
+                                  }
 
-          protocol::Frame frame;
-          frame.header = header;
-          frame.payload = std::move(payload_buffer_);
-          handle_frame(std::move(frame));
-        });
+                                  protocol::Frame frame;
+                                  frame.header = header;
+                                  frame.payload = std::move(payload_buffer_);
+                                  handle_frame(std::move(frame));
+                                }));
   }
 
   void handle_frame(protocol::Frame frame) {
@@ -1752,7 +1798,7 @@ private:
       const auto correlation_id = frame.header.correlation_id;
       auto self = shared_from_this();
       runtime_.async_produce(
-          std::move(request), socket_.get_executor(),
+          std::move(request), strand_,
           [this, self, correlation_id](BrokerRuntime::ProduceResult result) mutable {
             if (!result.ok) {
               write_error(correlation_id, result.error, result.message, false);
@@ -1822,8 +1868,8 @@ private:
 
     auto self = shared_from_this();
     auto completed = std::make_shared<std::atomic_bool>(false);
-    auto timer = std::make_shared<boost::asio::steady_timer>(socket_.get_executor());
-    const auto executor = socket_.get_executor();
+    auto timer = std::make_shared<boost::asio::steady_timer>(strand_);
+    const auto executor = boost::asio::any_io_executor{strand_};
     const auto wait_ms = request.max_wait_ms;
     request.max_wait_ms = 0;
     request.from = std::to_string(from_offset);
@@ -2331,7 +2377,8 @@ private:
     metrics_.record_response(request_frame_type_, bytes->size(), request_duration_seconds());
     boost::asio::async_write(
         socket_, boost::asio::buffer(*bytes),
-        [this, self, bytes, close_after_write](const boost::system::error_code& ec, std::size_t) {
+        boost::asio::bind_executor(strand_, [this, self, bytes, close_after_write](
+                                                const boost::system::error_code& ec, std::size_t) {
           if (ec || !socket_.is_open()) {
             cancel_active_waiter();
             return;
@@ -2343,7 +2390,7 @@ private:
             return;
           }
           read_header();
-        });
+        }));
   }
 
   [[nodiscard]] std::optional<std::uint64_t> request_duration_us() const {
@@ -2372,6 +2419,7 @@ private:
   }
 
   Tcp::socket socket_;
+  boost::asio::strand<boost::asio::any_io_executor> strand_;
   BrokerRuntime& runtime_;
   observability::MetricsRegistry& metrics_;
   std::function<bool()> ready_;
@@ -2407,8 +2455,8 @@ std::string utc_now_iso8601() {
 BrokerServer::BrokerServer(ServerOptions options, BuildInfo build_info)
     : options_(std::move(options)), build_info_(std::move(build_info)),
       startup_time_utc_(utc_now_iso8601()), startup_monotonic_(std::chrono::steady_clock::now()),
-      broker_acceptor_(io_), admin_acceptor_(io_), retention_timer_(io_),
-      metrics_(options_.metrics_enabled),
+      io_(static_cast<int>(options_.io_workers)), broker_acceptor_(io_), admin_acceptor_(io_),
+      retention_timer_(io_), metrics_(options_.metrics_enabled),
       runtime_(
           std::make_unique<BrokerRuntime>(options_, broker_token_from_environment(), metrics_)) {
   observability::configure_logging(observability::parse_log_level(options_.log_level),
@@ -2440,6 +2488,9 @@ void BrokerServer::start() {
   listening.string_fields["admin_listen"] = endpoint_to_string(options_.admin_listen);
   listening.string_fields["data_dir"] = options_.data_dir.string();
   listening.numeric_fields["waiter_count"] = runtime_->active_long_poll_waiters();
+  listening.numeric_fields["io_workers"] = options_.io_workers;
+  listening.numeric_fields["append_workers"] = options_.append_workers;
+  listening.numeric_fields["append_batch_records"] = options_.append_batch_records;
   write_structured_log(listening);
 }
 
@@ -2448,7 +2499,7 @@ void BrokerServer::stop() {
     return;
   }
   ready_ = false;
-  ready_detail_ = "shutting down";
+  set_ready_detail("shutting down");
   boost::system::error_code ignored;
   broker_acceptor_.close(ignored);
   admin_acceptor_.close(ignored);
@@ -2474,7 +2525,17 @@ void BrokerServer::wait_for_shutdown_signal() {
       stop();
     }
   });
+  std::vector<std::thread> workers;
+  workers.reserve(options_.io_workers - 1);
+  for (std::uint32_t index = 1; index < options_.io_workers; ++index) {
+    workers.emplace_back([this] { io_.run(); });
+  }
   io_.run();
+  for (auto& worker : workers) {
+    if (worker.joinable()) {
+      worker.join();
+    }
+  }
 }
 
 std::string BrokerServer::version_json() const {
@@ -2489,6 +2550,8 @@ std::string BrokerServer::metrics_text() const {
       std::chrono::duration<double>(std::chrono::steady_clock::now() - startup_monotonic_).count();
   snapshot.ready = ready_ && !stopping_;
   snapshot.connections_active = active_broker_sessions_.load();
+  snapshot.io_workers = options_.io_workers;
+  snapshot.append_workers = options_.append_workers;
   return observability::render_prometheus(snapshot);
 }
 
@@ -2509,8 +2572,9 @@ void BrokerServer::prepare_data_directory() {
   std::filesystem::create_directories(options_.data_dir, ec);
   if (ec) {
     ready_ = false;
-    ready_detail_ = "failed to create data directory: " + ec.message();
-    throw std::runtime_error(ready_detail_);
+    const auto detail = "failed to create data directory: " + ec.message();
+    set_ready_detail(detail);
+    throw std::runtime_error(detail);
   }
 
   const auto probe = options_.data_dir / ".boltstream-ready-check";
@@ -2518,8 +2582,9 @@ void BrokerServer::prepare_data_directory() {
     std::ofstream out{probe, std::ios::binary | std::ios::trunc};
     if (!out) {
       ready_ = false;
-      ready_detail_ = "data directory is not writable";
-      throw std::runtime_error(ready_detail_);
+      const std::string detail{"data directory is not writable"};
+      set_ready_detail(detail);
+      throw std::runtime_error(detail);
     }
     out << "ok\n";
   }
@@ -2545,12 +2610,13 @@ void BrokerServer::prepare_data_directory() {
     write_structured_log(recovery);
   } catch (const std::exception& error) {
     ready_ = false;
-    ready_detail_ = "storage recovery failed: " + std::string{error.what()};
-    throw std::runtime_error(ready_detail_);
+    const auto detail = "storage recovery failed: " + std::string{error.what()};
+    set_ready_detail(detail);
+    throw std::runtime_error(detail);
   }
 
   ready_ = true;
-  ready_detail_ = "ready";
+  set_ready_detail("ready");
 }
 
 void BrokerServer::schedule_retention() {
@@ -2662,16 +2728,20 @@ void BrokerServer::handle_broker_client(Tcp::socket socket) {
   metrics_.record_connection_accepted();
   std::make_shared<BrokerProtocolSession>(
       std::move(socket), *runtime_, metrics_, [this] { return ready(); },
-      [this] { return ready_detail_; }, [this] { active_broker_sessions_.fetch_sub(1); })
+      [this] { return ready_detail(); }, [this] { active_broker_sessions_.fetch_sub(1); })
       ->start();
 }
 
 void BrokerServer::handle_admin_client(Tcp::socket socket) {
+  auto strand = std::make_shared<boost::asio::strand<boost::asio::any_io_executor>>(
+      boost::asio::make_strand(socket.get_executor()));
   auto client = std::make_shared<Tcp::socket>(std::move(socket));
   auto request_data = std::make_shared<std::string>();
   boost::asio::async_read_until(
       *client, boost::asio::dynamic_buffer(*request_data, 2048), "\r\n\r\n",
-      [this, client, request_data](const boost::system::error_code& ec, std::size_t read) {
+      boost::asio::bind_executor(*strand, [this, strand, client,
+                                           request_data](const boost::system::error_code& ec,
+                                                         std::size_t read) {
         const auto request =
             ec ? AdminRequest{}
                : parse_admin_request(std::string_view{*request_data}.substr(0, read));
@@ -2717,12 +2787,14 @@ void BrokerServer::handle_admin_client(Tcp::socket socket) {
                                     "{\"status\":\"not_found\",\"service\":\"boltstream\"}");
         }
 
-        boost::asio::async_write(*client, boost::asio::buffer(*response),
-                                 [client, response](const boost::system::error_code&, std::size_t) {
-                                   boost::system::error_code ignored;
-                                   client->shutdown(Tcp::socket::shutdown_both, ignored);
-                                 });
-      });
+        boost::asio::async_write(
+            *client, boost::asio::buffer(*response),
+            boost::asio::bind_executor(
+                *strand, [strand, client, response](const boost::system::error_code&, std::size_t) {
+                  boost::system::error_code ignored;
+                  client->shutdown(Tcp::socket::shutdown_both, ignored);
+                }));
+      }));
 }
 
 BrokerServer::Tcp::endpoint BrokerServer::make_endpoint(const Endpoint& endpoint) const {
@@ -2734,13 +2806,23 @@ BrokerServer::Tcp::endpoint BrokerServer::make_endpoint(const Endpoint& endpoint
   return {address, endpoint.port};
 }
 
+void BrokerServer::set_ready_detail(std::string detail) {
+  std::lock_guard lock{ready_detail_mutex_};
+  ready_detail_ = std::move(detail);
+}
+
+std::string BrokerServer::ready_detail() const {
+  std::lock_guard lock{ready_detail_mutex_};
+  return ready_detail_;
+}
+
 std::string BrokerServer::health_json(std::string_view status) const {
   std::ostringstream out;
   out << "{";
   out << "\"service\":\"boltstream\",";
   out << "\"status\":\"" << status << "\",";
   out << "\"git_sha\":\"" << build_info_.git_sha << "\",";
-  out << "\"detail\":\"" << ready_detail_ << "\"";
+  out << "\"detail\":\"" << ready_detail() << "\"";
   out << "}";
   return out.str();
 }

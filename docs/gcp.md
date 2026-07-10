@@ -2,6 +2,30 @@
 
 BoltStream's GCP deployment is intentionally low-level and controlled: Terraform provisions infrastructure, SSH deploys the exact CI artifact, and systemd runs the broker.
 
+## Phase 10 Live Benchmark
+
+Phase 10 uses the existing VM and ports. The benchmark runner temporarily replaces
+the service command with a loopback-only checked-in profile, stores data under an
+isolated `/var/lib/boltstream/phase10-*` directory, runs the packaged benchmark
+client on the VM, and restores the normal service in a trap. It does not create a
+second VM or open a benchmark port.
+
+After the exact Release artifact is deployed and `/version` reports its 12-character
+SHA, run:
+
+```powershell
+.\deployments\gcp\scripts\benchmark-phase10-live.ps1 `
+  -GitSha <deployed-sha> `
+  -OutputDir .\artifacts\benchmarks\gcp
+```
+
+The script fails closed unless the active Google account is
+`nickaccturk@gmail.com`, rotates profile order across five rounds, downloads every
+raw JSON result, removes benchmark data and overrides, then requires the normal
+service to be active, ready, and still report the deployed SHA. Publish only after
+`terraform plan -detailed-exitcode` returns zero and the full authenticated live
+regression passes.
+
 ## Locked Target
 
 - GCP account: `nickaccturk@gmail.com`

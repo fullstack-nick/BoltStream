@@ -1,10 +1,10 @@
 server:
-  listen: "0.0.0.0:9000"
-  admin_listen: "0.0.0.0:9100"
+  listen: "127.0.0.1:9000"
+  admin_listen: "127.0.0.1:9100"
 runtime:
-  io_workers: 1
+  io_workers: 2
 storage:
-  data_dir: "/var/lib/boltstream"
+  data_dir: "./data"
   segment_bytes: 268435456
   segment_max_age_seconds: 3600
   append_batch_records: 1
@@ -14,16 +14,16 @@ retention:
   check_interval_ms: 60000
 limits:
   max_frame_bytes: 1048576
-  max_fetch_records: 10
+  max_fetch_records: 100
   max_fetch_bytes: 1048576
   max_topic_partitions: 128
   max_fetch_wait_ms: 30000
-  max_append_queue_depth: 32
+  max_append_queue_depth: 1024
   append_workers: 2
   max_broker_connections: 128
   max_long_poll_waiters: 128
 metrics:
   enabled: true
 logging:
-  level: info
+  level: warn
   format: json

@@ -36,7 +36,19 @@ dashboard on top of the Phase 8 retention and lifecycle runtime.
   and request duration in microseconds.
 - `boltstream-logtool` remains available for direct append, read, and recovery inspection of durable records.
 - `BOLTSTREAM_BROKER_TOKEN` enables broker-protocol auth; local development may omit it, while GCP deploys require it.
-- `boltstream-bench` remains a stable benchmark shell until the benchmark phase.
+- `boltstream-bench` runs authenticated produce-throughput, acknowledged-latency,
+  and fetch-throughput workloads with JSON and Markdown export.
+- `boltstream-microbench` isolates protocol, append, batching, segment-roll, and
+  read-path costs with Google Benchmark.
+
+## Phase 10 Benchmark Results
+
+<!-- PHASE10_BENCHMARK_START -->
+
+Canonical GCP results are generated only from an exact pushed Release artifact
+after the complete rotated benchmark matrix succeeds.
+
+<!-- PHASE10_BENCHMARK_END -->
 
 ## Native Windows Build
 

@@ -357,7 +357,8 @@ uint32 record_crc32
 
 ### Performance Targets
 
-Initial public benchmark targets on a local developer machine:
+Initial aspirational targets for developer-class hardware; these guide engineering
+but are not Phase 10 completion gates or expectations for the shared-core GCP VM:
 
 | Mode | Throughput Target | p50 Latency Target | p99 Latency Target |
 | --- | ---: | ---: | ---: |
@@ -1097,19 +1098,114 @@ live GCP proof path.
 
 ### Phase 10: Benchmarking and Performance Engineering
 
-Deliverables:
+#### Locked Boundary
 
-- Throughput benchmark.
-- Latency benchmark with p50, p95, p99, and max.
-- Single-threaded mode.
-- Worker event loop mode.
-- Batched write mode.
-- Benchmark result export as Markdown and JSON.
+- Preserve protocol version `4` and storage format version `2`. Phase 10 batches
+  existing produce jobs internally; batch-produce framing and zstd negotiation remain
+  Phase 11 work.
+- Keep compatibility defaults at one I/O event-loop worker, two append workers, and
+  one record per append batch. The three benchmark profiles select their runtime
+  settings explicitly and never rewrite normal production configuration from noisy
+  measurements.
+- The 100k/400k/750k performance values remain aspirational developer-class goals,
+  not release gates. Phase completion requires reproducible measurements, complete
+  environment labels, zero request errors, and honest disclosure of missed goals.
+- Durability is labeled `flush`: log and index C++ streams are flushed before produce
+  responses. Phase 10 does not claim `fsync` durability.
 
-Acceptance:
+#### Runtime Modes and Storage Batching
 
-- README benchmark table is generated from reproducible commands.
-- Benchmarks state hardware, OS, compiler, build type, payload size, durability mode, and client counts.
+- Add strict YAML and CLI settings:
+  - `runtime.io_workers` / `--io-workers`: `1..64`, default `1`, including the calling
+    thread;
+  - `storage.append_batch_records` / `--append-batch-records`: `1..1024`, default `1`;
+  - `limits.append_workers=0`: inline append, valid only with one I/O worker and a
+    batch size of one.
+- Run the shared Asio `io_context` from the configured thread pool. Broker protocol
+  sessions and the async client serialize their socket, timer, request, and response
+  state through strands.
+- Add `PartitionLog::append_batch`, retaining contiguous per-partition offsets and the
+  existing record format. It opens each segment/log index once per batch chunk,
+  flushes once, commits in-memory offsets only after both streams succeed, and rolls
+  file lengths back on a write failure.
+- Append workers drain at most the configured batch size from one partition without
+  a linger timer. Each source request receives its own correlated response after the
+  shared flush.
+- Publish `boltstream_append_batches_total`, the
+  `boltstream_append_batch_records` histogram, and runtime I/O/append worker gauges.
+- Checked-in profiles are:
+  - `single-threaded`: one I/O worker, inline append, batch size one;
+  - `worker-event-loops`: two I/O workers, two append workers, batch size one;
+  - `batched-writes`: two I/O workers, two append workers, batch size 32.
+
+#### Benchmark Binaries and Result Contract
+
+- `boltstream-bench run` drives authenticated `produce-throughput`,
+  `produce-latency`, and `fetch-throughput` workloads over the public binary
+  protocol. It supports explicit host/ports, profile metadata, deterministic topic,
+  partition, client, warmup, duration/message, key/payload, repetition, timeout, and
+  JSON/Markdown output controls. `--dry-run` remains non-publishing.
+- Throughput counts only successful acknowledged records. Latency uses
+  `steady_clock` from submission to correlated response and reports nearest-rank
+  p50/p95/p99 plus the true maximum. Any request, transport, timeout, cleanup, or
+  metrics failure invalidates the run.
+- `boltstream-microbench` uses pinned Google Benchmark for protocol encode/decode,
+  single append, batch append, segment roll, and read paths. It is installed in the
+  same Release artifact but does not supply headline numbers.
+- Versioned JSON records environment, actual CPU/OS/memory, compiler/build/SHA,
+  protocol/storage versions, exact broker settings, workload, every repetition,
+  throughput/MiB per second, latency, errors, and append-batch metric deltas.
+- `scripts/render-benchmarks.ps1` accepts only one exact Release SHA, the complete
+  three-profile/three-workload matrix, at least five error-free repetitions, and
+  secret/IP-free inputs. It generates the canonical JSON, detailed Markdown, and the
+  marked README table deterministically.
+
+#### Canonical Workloads
+
+- GCP produce throughput: four partitions, 16 producer connections, one outstanding
+  request per connection, 256-byte values, 16-byte deterministic keys, 60 seconds of
+  warmup, then 30 seconds measured.
+- GCP acknowledged produce latency: the same loaded topology, 10,000 warmup records,
+  then 100,000 measured records.
+- GCP fetch throughput: preload 250,000 records, then use four partition-specific
+  consumers to verify every record from the beginning.
+- Run five rounds with profile order rotated by round. Publish medians, min/max, and
+  coefficient of variation. If produce-throughput CV exceeds 15%, run five more
+  rounds and retain all samples; persistent shared-core instability is labeled, never
+  hidden by selecting one favorable sample.
+
+#### Verification and Live Proof
+
+1. Cover config bounds/cross-fields, batch ordering/rolling/recovery, inline append,
+   multi-threaded strands, metrics, percentiles, deterministic serialization,
+   redaction, error exits, and dry runs with unit and integration tests.
+2. Run GCC, Clang, MSVC, formatting, warnings-as-errors, existing phase smokes, all
+   three Phase 10 profiles, Google Benchmark dry-run, report-regeneration checks, and
+   a focused Linux ThreadSanitizer concurrency job. Shared CI runners never gate on
+   numeric performance.
+3. Run native Windows Release measurements as secondary evidence.
+4. Push the implementation, require green CI for the exact SHA, and deploy that
+   SHA's Linux Release artifact containing both benchmark binaries.
+5. On the existing Ubuntu `e2-micro`, fail closed on the expected Google account,
+   use loopback-only benchmark profiles and isolated `/var/lib/boltstream/phase10-*`
+   data directories, then capture the complete rotated matrix. Open no new port.
+6. Verify exact `/version`, readiness, systemd state, effective config, batch metrics,
+   disk headroom, zero errors, topic/data cleanup, normal service restoration, and a
+   clean Terraform plan.
+7. Generate the GCP-primary README table, `docs/benchmarks.md`, canonical result JSON,
+   and `proof/phase-10.md` with commands, CI run, artifact checksum, every workload,
+   dispersion, metrics, cleanup, and final live state.
+
+#### Acceptance
+
+- All three modes work locally, in CI smoke, and against the exact live GCP artifact;
+  the batched profile proves an average append batch above one while unbatched
+  profiles remain exactly one.
+- Produced/fetched counts match, every measured request succeeds, reports regenerate
+  exactly, no sample is cherry-picked, and earlier phase behavior remains green.
+- The normal GCP service is restored and healthy with no temporary override/data and
+  no Terraform drift. Missing aspirational performance goals are documented as
+  measured bottlenecks and do not block completion.
 
 ### Phase 11: Compression
 

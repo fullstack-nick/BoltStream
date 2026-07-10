@@ -6,6 +6,7 @@
 .\scripts\toolchain-check.ps1
 .\scripts\build.ps1 -Preset windows-gcc-debug
 .\scripts\test.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase10.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase9.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase8.ps1 -Preset windows-gcc-debug
 .\scripts\smoke-phase7.ps1 -Preset windows-gcc-debug
@@ -39,6 +40,29 @@ flags. Validate before starting or deploying:
 Unknown, duplicate, malformed, and out-of-range YAML values fail with exit code `2`
 before a socket is bound or the data directory is touched. The broker token remains
 environment-only and effective output contains only `auth_required: true|false`.
+
+Phase 10 adds three bounded performance controls while preserving compatibility
+defaults:
+
+- `runtime.io_workers` (`--io-workers`) is the total number of threads running the
+  broker Asio event loop; the default is one.
+- `limits.append_workers` remains two by default. Setting it to zero selects the
+  inline single-threaded profile and therefore requires one I/O worker and an append
+  batch size of one.
+- `storage.append_batch_records` (`--append-batch-records`) caps internal
+  per-partition coalescing; the default is one and the checked-in batched benchmark
+  profile uses 32 without changing the wire or storage format.
+
+The exact single-threaded, worker-event-loop, and batched-write configurations live
+under `benchmarks/profiles`. Run the local correctness-sized matrix with:
+
+```powershell
+.\scripts\smoke-phase10.ps1 -Preset windows-msvc-debug
+```
+
+Use `scripts/bench.ps1` without `-Quick` only from a Release preset. Benchmark
+results always state the worker settings, payload/key sizes, client counts, log
+level, metrics state, and `flush` durability.
 
 Admin endpoints:
 

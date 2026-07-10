@@ -55,6 +55,10 @@ jobs:
         if: matrix.build_type == 'Debug'
         run: pwsh ./scripts/format.ps1
 
+      - name: Phase 10 benchmark smoke
+        if: matrix.build_type == 'Debug'
+        run: pwsh ./scripts/smoke-phase10.ps1 -Preset linux-gcc-debug -SkipBuild
+
       - name: Validate Phase 9 operations assets
         if: matrix.build_type == 'Debug'
         run: |
@@ -105,3 +109,31 @@ jobs:
       - name: Phase 9 smoke
         shell: pwsh
         run: ./scripts/smoke-phase9.ps1 -Preset windows-msvc-debug
+
+      - name: Phase 10 benchmark smoke
+        shell: pwsh
+        run: ./scripts/smoke-phase10.ps1 -Preset windows-msvc-debug -SkipBuild
+
+  thread-sanitizer:
+    name: Linux ThreadSanitizer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure ThreadSanitizer
+        run: >-
+          cmake -S . -B build/linux-tsan -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DBOLTSTREAM_BUILD_BENCHMARKS=OFF
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+      - name: Build focused tests
+        run: cmake --build build/linux-tsan --target boltstream_tests
+
+      - name: Run concurrent broker tests
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: >-
+          ctest --test-dir build/linux-tsan --output-on-failure
+          -R "ClientBrokerTests.(ConcurrentMetricsScrapesRemainWellFormedDuringTraffic|ConcurrentProducersAssignUniqueOffsets|MultipleConcurrentRequestsPreserveCorrelationIds)"

@@ -129,8 +129,9 @@ ConfigResult apply_server(const YAML::Node& node, broker::ServerOptions& options
 }
 
 ConfigResult apply_storage(const YAML::Node& node, broker::ServerOptions& options) {
-  auto valid =
-      validate_mapping(node, "storage", {"data_dir", "segment_bytes", "segment_max_age_seconds"});
+  auto valid = validate_mapping(
+      node, "storage",
+      {"data_dir", "segment_bytes", "segment_max_age_seconds", "append_batch_records"});
   if (!valid.ok) {
     return valid;
   }
@@ -149,11 +150,19 @@ ConfigResult apply_storage(const YAML::Node& node, broker::ServerOptions& option
       if (!parsed.ok) {
         return parsed;
       }
-    } else {
+    } else if (key == "segment_max_age_seconds") {
       auto parsed = scalar_unsigned(item.second, "storage.segment_max_age_seconds",
                                     options.segment_max_age_seconds, true);
       if (!parsed.ok) {
         return parsed;
+      }
+    } else {
+      auto parsed = scalar_unsigned(item.second, "storage.append_batch_records",
+                                    options.append_batch_records, false);
+      if (!parsed.ok || options.append_batch_records > 1024) {
+        return parsed.ok
+                   ? failure("storage.append_batch_records must be between 1 and 1024", item.second)
+                   : parsed;
       }
     }
   }
@@ -220,7 +229,10 @@ ConfigResult apply_limits(const YAML::Node& node, broker::ServerOptions& options
       parsed = scalar_unsigned(item.second, "limits.max_append_queue_depth",
                                options.max_append_queue_depth, true);
     } else if (key == "append_workers") {
-      parsed = scalar_unsigned(item.second, "limits.append_workers", options.append_workers, false);
+      parsed = scalar_unsigned(item.second, "limits.append_workers", options.append_workers, true);
+      if (parsed.ok && options.append_workers > 64) {
+        return failure("limits.append_workers must be between 0 and 64", item.second);
+      }
     } else if (key == "max_broker_connections") {
       parsed = scalar_unsigned(item.second, "limits.max_broker_connections",
                                options.max_broker_connections, false);
@@ -231,6 +243,32 @@ ConfigResult apply_limits(const YAML::Node& node, broker::ServerOptions& options
     if (!parsed.ok) {
       return parsed;
     }
+  }
+  return {true, {}};
+}
+
+ConfigResult apply_runtime(const YAML::Node& node, broker::ServerOptions& options) {
+  auto valid = validate_mapping(node, "runtime", {"io_workers"});
+  if (!valid.ok) {
+    return valid;
+  }
+  if (const auto workers = node["io_workers"]) {
+    auto parsed = scalar_unsigned(workers, "runtime.io_workers", options.io_workers, false);
+    if (!parsed.ok) {
+      return parsed;
+    }
+    if (options.io_workers > 64) {
+      return failure("runtime.io_workers must be between 1 and 64", workers);
+    }
+  }
+  return {true, {}};
+}
+
+ConfigResult validate_cross_fields(const broker::ServerOptions& options) {
+  if (options.append_workers == 0 &&
+      (options.io_workers != 1 || options.append_batch_records != 1)) {
+    return {false, "limits.append_workers=0 requires runtime.io_workers=1 and "
+                   "storage.append_batch_records=1"};
   }
   return {true, {}};
 }
@@ -282,8 +320,9 @@ ConfigResult load_server_config(const std::filesystem::path& path, broker::Serve
   } catch (const YAML::Exception& error) {
     return {false, "failed to load config " + path.string() + ": " + error.what()};
   }
-  auto valid = validate_mapping(root, "config",
-                                {"server", "storage", "retention", "limits", "metrics", "logging"});
+  auto valid = validate_mapping(
+      root, "config",
+      {"server", "runtime", "storage", "retention", "limits", "metrics", "logging"});
   if (!valid.ok) {
     return valid;
   }
@@ -293,6 +332,8 @@ ConfigResult load_server_config(const std::filesystem::path& path, broker::Serve
     ConfigResult applied;
     if (key == "server") {
       applied = apply_server(item.second, options);
+    } else if (key == "runtime") {
+      applied = apply_runtime(item.second, options);
     } else if (key == "storage") {
       applied = apply_storage(item.second, options);
     } else if (key == "retention") {
@@ -308,7 +349,7 @@ ConfigResult load_server_config(const std::filesystem::path& path, broker::Serve
       return applied;
     }
   }
-  return {true, {}};
+  return validate_cross_fields(options);
 }
 
 std::string effective_config_yaml(const broker::ServerOptions& options, bool auth_required) {
@@ -316,10 +357,13 @@ std::string effective_config_yaml(const broker::ServerOptions& options, bool aut
   out << "server:\n";
   out << "  listen: \"" << broker::endpoint_to_string(options.listen) << "\"\n";
   out << "  admin_listen: \"" << broker::endpoint_to_string(options.admin_listen) << "\"\n";
+  out << "runtime:\n";
+  out << "  io_workers: " << options.io_workers << "\n";
   out << "storage:\n";
   out << "  data_dir: \"" << options.data_dir.generic_string() << "\"\n";
   out << "  segment_bytes: " << options.segment_bytes << "\n";
   out << "  segment_max_age_seconds: " << options.segment_max_age_seconds << "\n";
+  out << "  append_batch_records: " << options.append_batch_records << "\n";
   out << "retention:\n";
   out << "  max_age_seconds: " << options.retention_max_age_seconds << "\n";
   out << "  max_bytes: " << options.retention_max_bytes << "\n";

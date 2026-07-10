@@ -200,7 +200,7 @@ private:
   void dispatch_response(protocol::Frame frame);
   void fail_pending(boost::system::error_code ec);
 
-  boost::asio::io_context& io_;
+  boost::asio::strand<boost::asio::any_io_executor> strand_;
   boost::asio::ip::tcp::resolver resolver_;
   boost::asio::ip::tcp::socket socket_;
   std::uint32_t max_frame_bytes_;

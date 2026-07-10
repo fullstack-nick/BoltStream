@@ -18,6 +18,8 @@ inline constexpr std::size_t kMetricErrorCodeCount = 21;
 inline constexpr std::array<double, 16> kRequestDurationBuckets{
     0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,
     0.25,   0.5,   1.0,    2.5,   5.0,  10.0,  30.0, 60.0};
+inline constexpr std::array<std::uint64_t, 11> kAppendBatchRecordBuckets{1,  2,   4,   8,   16,  32,
+                                                                         64, 128, 256, 512, 1024};
 
 enum class RejectionReason : std::uint8_t {
   AppendQueue = 0,
@@ -30,6 +32,12 @@ struct HistogramSnapshot {
   std::array<std::uint64_t, kRequestDurationBuckets.size()> buckets{};
   std::uint64_t count{0};
   double sum{0.0};
+};
+
+struct AppendBatchHistogramSnapshot {
+  std::array<std::uint64_t, kAppendBatchRecordBuckets.size()> buckets{};
+  std::uint64_t count{0};
+  std::uint64_t sum{0};
 };
 
 struct RegistrySnapshot {
@@ -45,6 +53,8 @@ struct RegistrySnapshot {
   std::uint64_t protocol_sent_bytes{0};
   std::uint64_t records_produced{0};
   std::uint64_t records_fetched{0};
+  std::uint64_t append_batches{0};
+  AppendBatchHistogramSnapshot append_batch_records;
   std::uint64_t group_rebalances{0};
   std::uint64_t group_heartbeat_failures{0};
   std::uint64_t group_commit_failures{0};
@@ -97,6 +107,8 @@ struct RuntimeMetricsSnapshot {
   std::uint64_t partition_count{0};
   std::uint64_t storage_capacity_bytes{0};
   std::uint64_t storage_available_bytes{0};
+  std::uint64_t io_workers{0};
+  std::uint64_t append_workers{0};
   std::vector<PartitionMetrics> partitions;
   std::vector<ConsumerGroupMetrics> groups;
   std::vector<ConsumerLagMetrics> lags;
@@ -116,6 +128,7 @@ public:
   void record_connection_rejected();
   void record_records_produced(std::uint64_t count);
   void record_records_fetched(std::uint64_t count);
+  void record_append_batch(std::uint64_t records);
   void record_group_rebalance();
   void record_retention_run(std::uint64_t segments_deleted, std::uint64_t bytes_deleted);
   void record_retention_failure();
@@ -138,6 +151,18 @@ private:
     double sum_{0.0};
   };
 
+  class AppendBatchHistogram {
+  public:
+    void observe(std::uint64_t value);
+    [[nodiscard]] AppendBatchHistogramSnapshot snapshot() const;
+
+  private:
+    mutable std::mutex mutex_;
+    std::array<std::uint64_t, kAppendBatchRecordBuckets.size()> buckets_{};
+    std::uint64_t count_{0};
+    std::uint64_t sum_{0};
+  };
+
   [[nodiscard]] static std::size_t frame_index(protocol::FrameType operation);
   [[nodiscard]] static std::size_t error_index(protocol::ErrorCode error);
 
@@ -156,6 +181,8 @@ private:
   std::atomic<std::uint64_t> protocol_sent_bytes_{0};
   std::atomic<std::uint64_t> records_produced_{0};
   std::atomic<std::uint64_t> records_fetched_{0};
+  std::atomic<std::uint64_t> append_batches_{0};
+  AppendBatchHistogram append_batch_records_;
   std::atomic<std::uint64_t> group_rebalances_{0};
   std::atomic<std::uint64_t> group_heartbeat_failures_{0};
   std::atomic<std::uint64_t> group_commit_failures_{0};

@@ -21,36 +21,40 @@ boost::system::error_code message_size_error() {
 } // namespace
 
 AsyncClient::AsyncClient(boost::asio::io_context& io, std::uint32_t max_frame_bytes)
-    : io_(io), resolver_(io), socket_(io), max_frame_bytes_(max_frame_bytes) {}
+    : strand_(boost::asio::make_strand(io)), resolver_(strand_), socket_(strand_),
+      max_frame_bytes_(max_frame_bytes) {}
 
 AsyncClient::~AsyncClient() { close(); }
 
 void AsyncClient::async_connect_impl(std::string host, std::uint16_t port, ConnectHandler handler) {
-  resolver_.async_resolve(
-      std::move(host), std::to_string(port),
-      [this, handler = std::move(handler)](
-          const boost::system::error_code& ec,
-          const boost::asio::ip::tcp::resolver::results_type& endpoints) mutable {
-        if (ec) {
-          handler(ec);
-          return;
-        }
-        boost::asio::async_connect(
-            socket_, endpoints,
-            [this, handler = std::move(handler)](const boost::system::error_code& connect_ec,
-                                                 const boost::asio::ip::tcp::endpoint&) mutable {
-              if (!connect_ec) {
-                start_read_header();
-              }
-              handler(connect_ec);
-            });
-      });
+  boost::asio::post(strand_, [this, host = std::move(host), port,
+                              handler = std::move(handler)]() mutable {
+    resolver_.async_resolve(
+        std::move(host), std::to_string(port),
+        [this, handler = std::move(handler)](
+            const boost::system::error_code& ec,
+            const boost::asio::ip::tcp::resolver::results_type& endpoints) mutable {
+          if (ec) {
+            handler(ec);
+            return;
+          }
+          boost::asio::async_connect(
+              socket_, endpoints,
+              [this, handler = std::move(handler)](const boost::system::error_code& connect_ec,
+                                                   const boost::asio::ip::tcp::endpoint&) mutable {
+                if (!connect_ec) {
+                  start_read_header();
+                }
+                handler(connect_ec);
+              });
+        });
+  });
 }
 
 void AsyncClient::async_request_impl(protocol::FrameType frame_type,
                                      std::vector<std::uint8_t> payload, ResponseHandler handler) {
-  boost::asio::post(io_, [this, frame_type, payload = std::move(payload),
-                          handler = std::move(handler)]() mutable {
+  boost::asio::post(strand_, [this, frame_type, payload = std::move(payload),
+                              handler = std::move(handler)]() mutable {
     if (!socket_.is_open()) {
       handler(make_error_code(boost::asio::error::not_connected), {});
       return;

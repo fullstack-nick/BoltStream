@@ -21,6 +21,7 @@ TEST(MetricsTests, RegistryRecordsCountersErrorsHistogramsAndRecovery) {
   metrics.record_connection_rejected();
   metrics.record_records_produced(3);
   metrics.record_records_fetched(2);
+  metrics.record_append_batch(3);
   metrics.record_group_rebalance();
   metrics.record_retention_run(2, 128);
   metrics.set_recovery(0.25, 10, 4);
@@ -40,6 +41,9 @@ TEST(MetricsTests, RegistryRecordsCountersErrorsHistogramsAndRecovery) {
   EXPECT_EQ(snapshot.protocol_sent_bytes, 96U);
   EXPECT_EQ(snapshot.records_produced, 3U);
   EXPECT_EQ(snapshot.records_fetched, 2U);
+  EXPECT_EQ(snapshot.append_batches, 1U);
+  EXPECT_EQ(snapshot.append_batch_records.count, 1U);
+  EXPECT_EQ(snapshot.append_batch_records.sum, 3U);
   EXPECT_EQ(snapshot.group_rebalances, 1U);
   EXPECT_EQ(snapshot.retention_runs, 1U);
   EXPECT_EQ(snapshot.retention_deleted_segments, 2U);
@@ -83,6 +87,8 @@ TEST(MetricsTests, RendererEscapesLabelsAndEmitsCumulativeHistograms) {
   snapshot.build_info = {"boltstream", "0.1.0", "abc123", "Debug", "GCC \"test\"", "4", "2"};
   snapshot.registry = metrics.snapshot();
   snapshot.ready = true;
+  snapshot.io_workers = 2;
+  snapshot.append_workers = 2;
   snapshot.partitions.push_back({"quotes\\live", 2, 1, 32, 3, 4096, 10, 20});
   snapshot.groups.push_back({"dash\nboard", "quotes\\live", 1, 4});
   snapshot.lags.push_back({"dash\nboard", "quotes\\live", 2, 5, false});
@@ -98,6 +104,8 @@ TEST(MetricsTests, RendererEscapesLabelsAndEmitsCumulativeHistograms) {
   EXPECT_NE(
       output.find("boltstream_request_duration_seconds_bucket{operation=\"fetch\",le=\"+Inf\"} 1"),
       std::string::npos);
+  EXPECT_NE(output.find("boltstream_runtime_io_workers 2"), std::string::npos);
+  EXPECT_NE(output.find("boltstream_runtime_append_workers 2"), std::string::npos);
   EXPECT_EQ(output.back(), '\n');
 }
 
@@ -105,10 +113,12 @@ TEST(MetricsTests, DisabledRegistryRemainsZero) {
   MetricsRegistry metrics{false};
   metrics.record_request(FrameType::ProduceRequest, 64);
   metrics.record_records_produced(1);
+  metrics.record_append_batch(1);
   metrics.record_retention_run(1, 10);
 
   const auto snapshot = metrics.snapshot();
   EXPECT_EQ(snapshot.requests[static_cast<std::size_t>(FrameType::ProduceRequest)], 0U);
   EXPECT_EQ(snapshot.records_produced, 0U);
+  EXPECT_EQ(snapshot.append_batches, 0U);
   EXPECT_EQ(snapshot.retention_runs, 0U);
 }

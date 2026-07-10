@@ -8,6 +8,7 @@
 #include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
@@ -306,56 +307,132 @@ PartitionLog::PartitionLog(PartitionLogOptions options) : options_(std::move(opt
 
 RecordMetadata PartitionLog::append(std::span<const std::uint8_t> key,
                                     std::span<const std::uint8_t> value) {
-  const auto timestamp = unix_time_ns();
-  auto encoded = encode_record(next_offset_, timestamp, key, value);
+  const AppendRecord record{key, value};
+  auto appended = append_batch(std::span<const AppendRecord>{&record, 1});
+  return std::move(appended.front());
+}
 
+std::vector<RecordMetadata> PartitionLog::append_batch(std::span<const AppendRecord> records) {
+  if (records.empty()) {
+    return {};
+  }
+
+  struct OriginalFiles {
+    std::filesystem::path log_path;
+    std::filesystem::path index_path;
+    std::uintmax_t log_bytes{0};
+    std::uintmax_t index_bytes{0};
+  };
+  std::map<std::uint64_t, OriginalFiles> originals;
+  for (const auto& segment : list_segments(partition_dir_)) {
+    const auto index_file = index_path(segment.base_offset);
+    originals.emplace(segment.base_offset, OriginalFiles{segment.log_path, index_file,
+                                                         file_size_or_zero(segment.log_path),
+                                                         file_size_or_zero(index_file)});
+  }
+
+  const auto original_index_size = index_.size();
+  const auto original_next_offset = next_offset_;
+  std::vector<IndexEntry> staged_index;
+  std::vector<RecordMetadata> metadata;
+  staged_index.reserve(records.size());
+  metadata.reserve(records.size());
+
+  std::ofstream log_file;
+  std::ofstream index_file;
   std::uint64_t base_offset = active_segment_base();
-  auto log_path = segment_path(base_offset);
-  auto current_size = file_size_or_zero(log_path);
-  const auto age_roll_due = options_.segment_max_age_seconds > 0 && current_size > 0 &&
-                            file_age_seconds_or_zero(log_path) >= options_.segment_max_age_seconds;
-  const auto size_roll_due =
-      current_size > 0 && current_size + encoded.size() > options_.max_segment_bytes;
-  if (size_roll_due || age_roll_due) {
-    base_offset = next_offset_;
-    log_path = segment_path(base_offset);
-    current_size = 0;
+  auto active_log_path = segment_path(base_offset);
+  auto current_size = file_size_or_zero(active_log_path);
+
+  auto flush_chunk = [&] {
+    if (!log_file.is_open()) {
+      return;
+    }
+    log_file.flush();
+    index_file.flush();
+    if (!log_file || !index_file) {
+      throw std::runtime_error("failed to flush append batch for segment " +
+                               active_log_path.string());
+    }
+    log_file.close();
+    index_file.close();
+  };
+
+  auto open_chunk = [&] {
+    active_log_path = segment_path(base_offset);
+    log_file.open(active_log_path, std::ios::binary | std::ios::app);
+    if (!log_file) {
+      throw std::runtime_error("failed to open segment for append: " + active_log_path.string());
+    }
+    index_file.open(index_path(base_offset), std::ios::binary | std::ios::app);
+    if (!index_file) {
+      throw std::runtime_error("failed to open index for append: " +
+                               index_path(base_offset).string());
+    }
+  };
+
+  try {
+    for (std::size_t record_index = 0; record_index < records.size(); ++record_index) {
+      const auto offset = original_next_offset + record_index;
+      const auto timestamp = unix_time_ns();
+      auto encoded =
+          encode_record(offset, timestamp, records[record_index].key, records[record_index].value);
+      const auto age_roll_due =
+          options_.segment_max_age_seconds > 0 && current_size > 0 &&
+          file_age_seconds_or_zero(active_log_path) >= options_.segment_max_age_seconds;
+      const auto size_roll_due =
+          current_size > 0 && current_size + encoded.size() > options_.max_segment_bytes;
+      if (size_roll_due || age_roll_due) {
+        flush_chunk();
+        base_offset = offset;
+        active_log_path = segment_path(base_offset);
+        current_size = 0;
+      }
+      if (!log_file.is_open()) {
+        open_chunk();
+      }
+
+      const auto record_bytes = static_cast<std::uint32_t>(encoded.size() - sizeof(std::uint32_t));
+      log_file.write(reinterpret_cast<const char*>(encoded.data()),
+                     static_cast<std::streamsize>(encoded.size()));
+      write_index_entry(index_file, offset, static_cast<std::uint64_t>(current_size), record_bytes);
+      if (!log_file || !index_file) {
+        throw std::runtime_error("failed to write append batch for segment " +
+                                 active_log_path.string());
+      }
+
+      staged_index.push_back(
+          {offset, static_cast<std::uint64_t>(current_size), record_bytes, active_log_path});
+      metadata.push_back({options_.topic, options_.partition_id, offset, timestamp,
+                          static_cast<std::uint32_t>(encoded.size())});
+      current_size += encoded.size();
+    }
+    flush_chunk();
+  } catch (...) {
+    log_file.close();
+    index_file.close();
+    std::error_code ignored;
+    for (const auto& segment : list_segments(partition_dir_)) {
+      const auto original = originals.find(segment.base_offset);
+      if (original == originals.end()) {
+        std::filesystem::remove(segment.log_path, ignored);
+        std::filesystem::remove(index_path(segment.base_offset), ignored);
+      } else {
+        std::filesystem::resize_file(original->second.log_path, original->second.log_bytes,
+                                     ignored);
+        ignored.clear();
+        std::filesystem::resize_file(original->second.index_path, original->second.index_bytes,
+                                     ignored);
+      }
+    }
+    index_.resize(original_index_size);
+    next_offset_ = original_next_offset;
+    throw;
   }
 
-  std::ofstream log_file{log_path, std::ios::binary | std::ios::app};
-  if (!log_file) {
-    throw std::runtime_error("failed to open segment for append: " + log_path.string());
-  }
-  log_file.write(reinterpret_cast<const char*>(encoded.data()),
-                 static_cast<std::streamsize>(encoded.size()));
-  log_file.flush();
-  if (!log_file) {
-    throw std::runtime_error("failed to append record to segment: " + log_path.string());
-  }
-
-  const auto record_bytes = static_cast<std::uint32_t>(encoded.size() - sizeof(std::uint32_t));
-  std::ofstream index_file{index_path(base_offset), std::ios::binary | std::ios::app};
-  if (!index_file) {
-    throw std::runtime_error("failed to open index for append: " +
-                             index_path(base_offset).string());
-  }
-  write_index_entry(index_file, next_offset_, static_cast<std::uint64_t>(current_size),
-                    record_bytes);
-  index_file.flush();
-  if (!index_file) {
-    throw std::runtime_error("failed to append index entry: " + index_path(base_offset).string());
-  }
-
-  RecordMetadata metadata;
-  metadata.topic = options_.topic;
-  metadata.partition = options_.partition_id;
-  metadata.offset = next_offset_;
-  metadata.timestamp_unix_ns = timestamp;
-  metadata.encoded_byte_size = static_cast<std::uint32_t>(encoded.size());
-
-  index_.push_back(
-      {next_offset_, static_cast<std::uint64_t>(current_size), record_bytes, std::move(log_path)});
-  ++next_offset_;
+  index_.insert(index_.end(), std::make_move_iterator(staged_index.begin()),
+                std::make_move_iterator(staged_index.end()));
+  next_offset_ += records.size();
   return metadata;
 }
 

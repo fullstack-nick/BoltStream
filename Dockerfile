@@ -41,6 +41,7 @@ COPY --from=builder /src/build/linux-gcc-release/boltstream-server /usr/local/bi
 COPY --from=builder /src/build/linux-gcc-release/boltstream-producer /usr/local/bin/boltstream-producer
 COPY --from=builder /src/build/linux-gcc-release/boltstream-consumer /usr/local/bin/boltstream-consumer
 COPY --from=builder /src/build/linux-gcc-release/boltstream-bench /usr/local/bin/boltstream-bench
+COPY --from=builder /src/build/linux-gcc-release/boltstream-microbench /usr/local/bin/boltstream-microbench
 COPY --from=builder /src/build/linux-gcc-release/boltstream-logtool /usr/local/bin/boltstream-logtool
 COPY --from=builder /src/build/linux-gcc-release/boltstream-admin /usr/local/bin/boltstream-admin
 COPY config/boltstream.compose.yaml /etc/boltstream/boltstream.yaml

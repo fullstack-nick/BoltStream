@@ -111,6 +111,23 @@ HistogramSnapshot MetricsRegistry::Histogram::snapshot() const {
   return {buckets_, count_, sum_};
 }
 
+void MetricsRegistry::AppendBatchHistogram::observe(std::uint64_t value) {
+  std::lock_guard lock{mutex_};
+  ++count_;
+  sum_ += value;
+  for (std::size_t index = 0; index < kAppendBatchRecordBuckets.size(); ++index) {
+    if (value <= kAppendBatchRecordBuckets[index]) {
+      ++buckets_[index];
+      break;
+    }
+  }
+}
+
+AppendBatchHistogramSnapshot MetricsRegistry::AppendBatchHistogram::snapshot() const {
+  std::lock_guard lock{mutex_};
+  return {buckets_, count_, sum_};
+}
+
 std::size_t MetricsRegistry::frame_index(protocol::FrameType operation) {
   return std::min<std::size_t>(static_cast<std::size_t>(operation), kMetricFrameTypeCount - 1);
 }
@@ -180,6 +197,14 @@ void MetricsRegistry::record_records_fetched(std::uint64_t count) {
   if (enabled_) {
     records_fetched_.fetch_add(count, std::memory_order_relaxed);
   }
+}
+
+void MetricsRegistry::record_append_batch(std::uint64_t records) {
+  if (!enabled_) {
+    return;
+  }
+  append_batches_.fetch_add(1, std::memory_order_relaxed);
+  append_batch_records_.observe(records);
 }
 
 void MetricsRegistry::record_group_rebalance() {
@@ -252,6 +277,8 @@ RegistrySnapshot MetricsRegistry::snapshot() const {
   result.protocol_sent_bytes = protocol_sent_bytes_.load(std::memory_order_relaxed);
   result.records_produced = records_produced_.load(std::memory_order_relaxed);
   result.records_fetched = records_fetched_.load(std::memory_order_relaxed);
+  result.append_batches = append_batches_.load(std::memory_order_relaxed);
+  result.append_batch_records = append_batch_records_.snapshot();
   result.group_rebalances = group_rebalances_.load(std::memory_order_relaxed);
   result.group_heartbeat_failures = group_heartbeat_failures_.load(std::memory_order_relaxed);
   result.group_commit_failures = group_commit_failures_.load(std::memory_order_relaxed);
@@ -364,6 +391,29 @@ std::string render_prometheus(const RuntimeMetricsSnapshot& snapshot) {
   sample(out, "boltstream_records_produced_total", registry.records_produced);
   family(out, "boltstream_records_fetched_total", "Records fetched since startup.", "counter");
   sample(out, "boltstream_records_fetched_total", registry.records_fetched);
+  family(out, "boltstream_append_batches_total", "Storage append batches flushed since startup.",
+         "counter");
+  sample(out, "boltstream_append_batches_total", registry.append_batches);
+  family(out, "boltstream_append_batch_records", "Records contained in storage append batches.",
+         "histogram");
+  {
+    std::uint64_t cumulative = 0;
+    for (std::size_t index = 0; index < kAppendBatchRecordBuckets.size(); ++index) {
+      cumulative += registry.append_batch_records.buckets[index];
+      out << "boltstream_append_batch_records_bucket"
+          << labels({{"le", std::to_string(kAppendBatchRecordBuckets[index])}}) << ' ' << cumulative
+          << '\n';
+    }
+    out << "boltstream_append_batch_records_bucket" << labels({{"le", "+Inf"}}) << ' '
+        << registry.append_batch_records.count << '\n';
+    out << "boltstream_append_batch_records_sum " << registry.append_batch_records.sum << '\n';
+    out << "boltstream_append_batch_records_count " << registry.append_batch_records.count << '\n';
+  }
+  family(out, "boltstream_runtime_io_workers", "Configured broker I/O event-loop workers.",
+         "gauge");
+  sample(out, "boltstream_runtime_io_workers", snapshot.io_workers);
+  family(out, "boltstream_runtime_append_workers", "Configured storage append workers.", "gauge");
+  sample(out, "boltstream_runtime_append_workers", snapshot.append_workers);
 
   family(out, "boltstream_partition_append_queue_depth",
          "Current active and pending append work by partition.", "gauge");

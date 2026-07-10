@@ -1,10 +1,13 @@
 server:
   listen: "0.0.0.0:9000"
   admin_listen: "127.0.0.1:9100"
+runtime:
+  io_workers: 1
 storage:
   data_dir: "/var/lib/boltstream"
   segment_bytes: 268435456
   segment_max_age_seconds: 3600
+  append_batch_records: 1
 retention:
   max_age_seconds: 604800
   max_bytes: 1073741824

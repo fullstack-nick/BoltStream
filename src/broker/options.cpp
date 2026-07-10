@@ -158,6 +158,13 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
       parsed.options.listen.port = port;
     } else if (arg == "--data") {
       parsed.options.data_dir = std::filesystem::path{std::string{require_value(arg)}};
+    } else if (arg == "--io-workers") {
+      std::uint32_t io_workers{};
+      if (!parse_u32(require_value(arg), io_workers) || io_workers > 64) {
+        parsed.error = "invalid --io-workers value, expected 1..64";
+        return parsed;
+      }
+      parsed.options.io_workers = io_workers;
     } else if (arg == "--max-frame-bytes") {
       std::uint32_t max_frame_bytes{};
       if (!parse_u32(require_value(arg), max_frame_bytes)) {
@@ -203,11 +210,18 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
       parsed.options.max_append_queue_depth = max_append_queue_depth;
     } else if (arg == "--append-workers") {
       std::uint32_t append_workers{};
-      if (!parse_u32(require_value(arg), append_workers)) {
-        parsed.error = "invalid --append-workers value";
+      if (!parse_u32(require_value(arg), append_workers, true) || append_workers > 64) {
+        parsed.error = "invalid --append-workers value, expected 0..64";
         return parsed;
       }
       parsed.options.append_workers = append_workers;
+    } else if (arg == "--append-batch-records") {
+      std::uint32_t append_batch_records{};
+      if (!parse_u32(require_value(arg), append_batch_records) || append_batch_records > 1024) {
+        parsed.error = "invalid --append-batch-records value, expected 1..1024";
+        return parsed;
+      }
+      parsed.options.append_batch_records = append_batch_records;
     } else if (arg == "--max-broker-connections") {
       std::uint32_t max_broker_connections{};
       if (!parse_u32(require_value(arg), max_broker_connections)) {
@@ -284,16 +298,23 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
     }
   }
 
+  if (parsed.options.append_workers == 0 &&
+      (parsed.options.io_workers != 1 || parsed.options.append_batch_records != 1)) {
+    parsed.error = "--append-workers 0 requires --io-workers 1 and --append-batch-records 1";
+  }
+
   return parsed;
 }
 
 std::string server_usage() {
   return "Usage: boltstream-server [--config PATH] [--check-config] "
          "[--print-effective-config] [--listen HOST:PORT] [--port PORT] "
-         "[--admin-listen HOST:PORT] [--data PATH] [--max-frame-bytes BYTES] "
+         "[--admin-listen HOST:PORT] [--io-workers N] [--data PATH] "
+         "[--max-frame-bytes BYTES] "
          "[--max-fetch-records N] [--max-fetch-bytes BYTES] "
          "[--max-topic-partitions N] [--max-fetch-wait-ms MS] "
          "[--max-append-queue-depth N] [--append-workers N] "
+         "[--append-batch-records N] "
          "[--max-broker-connections N] [--max-long-poll-waiters N] "
          "[--segment-bytes BYTES] [--segment-max-age-seconds SECONDS] "
          "[--retention-max-age-seconds SECONDS] [--retention-max-bytes BYTES] "
@@ -306,6 +327,7 @@ std::string server_usage() {
          "Defaults:\n"
          "  --listen 0.0.0.0:9000\n"
          "  --admin-listen 127.0.0.1:9100\n"
+         "  --io-workers 1\n"
          "  --data ./data\n"
          "  --max-frame-bytes 1048576\n"
          "  --max-fetch-records 100\n"
@@ -314,6 +336,7 @@ std::string server_usage() {
          "  --max-fetch-wait-ms 30000\n"
          "  --max-append-queue-depth 32\n"
          "  --append-workers 2\n"
+         "  --append-batch-records 1\n"
          "  --max-broker-connections 128\n"
          "  --max-long-poll-waiters 128\n"
          "  --segment-bytes 268435456\n"

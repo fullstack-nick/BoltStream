@@ -10,6 +10,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace boltstream::broker {
@@ -42,6 +43,8 @@ private:
   void accept_admin_client();
   void handle_broker_client(Tcp::socket socket);
   void handle_admin_client(Tcp::socket socket);
+  void set_ready_detail(std::string detail);
+  [[nodiscard]] std::string ready_detail() const;
 
   [[nodiscard]] Tcp::endpoint make_endpoint(const Endpoint& endpoint) const;
   [[nodiscard]] std::string health_json(std::string_view status) const;
@@ -56,6 +59,7 @@ private:
   std::atomic_bool ready_{false};
   std::atomic_bool stopping_{false};
   std::atomic<std::uint32_t> active_broker_sessions_{0};
+  mutable std::mutex ready_detail_mutex_;
   std::string ready_detail_{"starting"};
 
   boost::asio::io_context io_;

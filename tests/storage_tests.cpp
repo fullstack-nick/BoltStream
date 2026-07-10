@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -88,6 +89,77 @@ TEST(StorageTests, AppendAndReadRoundTripAssignsOffsets) {
   EXPECT_EQ(records[0].metadata.partition, 0U);
   EXPECT_EQ(text(records[1].key), "MSFT");
   EXPECT_EQ(text(records[2].value), "300");
+}
+
+TEST(StorageTests, AppendBatchPreservesOrderOffsetsAndRecovery) {
+  TempDir temp;
+  const std::vector<std::vector<std::uint8_t>> keys{bytes("AAPL"), bytes("MSFT"), bytes("NVDA")};
+  const std::vector<std::vector<std::uint8_t>> values{bytes("100"), bytes("200"), bytes("300")};
+  const std::vector<boltstream::storage::AppendRecord> batch{
+      {keys[0], values[0]}, {keys[1], values[1]}, {keys[2], values[2]}};
+
+  {
+    auto log = open_log(temp.path);
+    const auto metadata = log.append_batch(batch);
+    ASSERT_EQ(metadata.size(), 3U);
+    EXPECT_EQ(metadata[0].offset, 0U);
+    EXPECT_EQ(metadata[1].offset, 1U);
+    EXPECT_EQ(metadata[2].offset, 2U);
+    EXPECT_EQ(log.next_offset(), 3U);
+  }
+
+  auto recovered = open_log(temp.path);
+  const auto records = recovered.read_from(0, 10, 0);
+  ASSERT_EQ(records.size(), 3U);
+  EXPECT_EQ(text(records[0].key), "AAPL");
+  EXPECT_EQ(text(records[1].value), "200");
+  EXPECT_EQ(text(records[2].key), "NVDA");
+}
+
+TEST(StorageTests, AppendBatchRollsAcrossSegmentsAndEmptyBatchIsNoOp) {
+  TempDir temp;
+  auto log = open_log(temp.path, 80);
+  const std::vector<std::vector<std::uint8_t>> keys{bytes("A"), bytes("B"), bytes("C")};
+  const std::vector<std::vector<std::uint8_t>> values{
+      bytes("message-00000000000000000000000000000000"),
+      bytes("message-11111111111111111111111111111111"),
+      bytes("message-22222222222222222222222222222222")};
+  const std::vector<boltstream::storage::AppendRecord> batch{
+      {keys[0], values[0]}, {keys[1], values[1]}, {keys[2], values[2]}};
+
+  EXPECT_TRUE(log.append_batch({}).empty());
+  const auto metadata = log.append_batch(batch);
+
+  ASSERT_EQ(metadata.size(), 3U);
+  EXPECT_GE(files_with_extension(partition_dir(temp.path), ".log").size(), 2U);
+  EXPECT_EQ(files_with_extension(partition_dir(temp.path), ".log").size(),
+            files_with_extension(partition_dir(temp.path), ".index").size());
+}
+
+TEST(StorageTests, AppendBatchFailurePreservesOffsetsAndRecoversOriginalRecords) {
+  TempDir temp;
+  auto log = open_log(temp.path);
+  append_record(log, "AAPL", "100");
+
+  const auto log_path = files_with_extension(partition_dir(temp.path), ".log").front();
+  const auto index_path = files_with_extension(partition_dir(temp.path), ".index").front();
+  const auto original_log_bytes = std::filesystem::file_size(log_path);
+  std::filesystem::remove(index_path);
+  std::filesystem::create_directory(index_path);
+
+  const auto key = bytes("MSFT");
+  const auto value = bytes("200");
+  const std::array batch{boltstream::storage::AppendRecord{key, value}};
+  EXPECT_THROW((void)log.append_batch(batch), std::runtime_error);
+  EXPECT_EQ(log.next_offset(), 1U);
+  EXPECT_EQ(std::filesystem::file_size(log_path), original_log_bytes);
+
+  std::filesystem::remove_all(index_path);
+  auto recovered = open_log(temp.path);
+  const auto records = recovered.read_from(0, 10, 0);
+  ASSERT_EQ(records.size(), 1U);
+  EXPECT_EQ(records[0].metadata.offset, 0U);
+  EXPECT_EQ(text(records[0].value), "100");
 }
 
 TEST(StorageTests, ReopenRecoversRecordsAndNextOffset) {

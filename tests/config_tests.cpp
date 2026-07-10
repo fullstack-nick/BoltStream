@@ -38,10 +38,13 @@ TEST(ConfigTests, LoadsYamlAndAppliesCliOverrides) {
   TemporaryConfig config{R"(server:
   listen: "127.0.0.1:9200"
   admin_listen: "127.0.0.1:9300"
+runtime:
+  io_workers: 4
 storage:
   data_dir: "yaml-data"
   segment_bytes: 512
   segment_max_age_seconds: 0
+  append_batch_records: 32
 retention:
   max_age_seconds: 0
   max_bytes: 2048
@@ -79,7 +82,9 @@ logging:
   EXPECT_EQ(parsed.options.listen.host, "127.0.0.1");
   EXPECT_EQ(parsed.options.listen.port, 9400);
   EXPECT_EQ(parsed.options.admin_listen.port, 9300);
+  EXPECT_EQ(parsed.options.io_workers, 4U);
   EXPECT_EQ(parsed.options.data_dir.generic_string(), "yaml-data");
+  EXPECT_EQ(parsed.options.append_batch_records, 32U);
   EXPECT_EQ(parsed.options.segment_bytes, 512U);
   EXPECT_EQ(parsed.options.max_append_queue_depth, 0U);
   EXPECT_EQ(parsed.options.append_workers, 4U);
@@ -112,13 +117,15 @@ TEST(ConfigTests, RejectsUnknownAndDuplicateKeysWithLocations) {
 }
 
 TEST(ConfigTests, RejectsInvalidTypesRangesAndLogging) {
-  TemporaryConfig config{R"(limits:
+  TemporaryConfig config{R"(runtime:
+  io_workers: 2
+limits:
   append_workers: 0
 )"};
   boltstream::broker::ServerOptions options;
   const auto result = boltstream::config::load_server_config(config.path(), options);
   EXPECT_FALSE(result.ok);
-  EXPECT_NE(result.error.find("limits.append_workers"), std::string::npos);
+  EXPECT_NE(result.error.find("requires runtime.io_workers=1"), std::string::npos);
 
   TemporaryConfig logging{R"(logging:
   level: verbose
@@ -139,6 +146,8 @@ TEST(ConfigTests, EffectiveConfigIsDeterministicAndSecretFree) {
 
   EXPECT_EQ(first, second);
   EXPECT_NE(first.find("listen: \"127.0.0.1:9900\""), std::string::npos);
+  EXPECT_NE(first.find("io_workers: 1"), std::string::npos);
+  EXPECT_NE(first.find("append_batch_records: 1"), std::string::npos);
   EXPECT_NE(first.find("auth_required: true"), std::string::npos);
   EXPECT_EQ(first.find("token"), std::string::npos);
   EXPECT_EQ(first.find("secret"), std::string::npos);

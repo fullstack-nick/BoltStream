@@ -39,6 +39,11 @@ struct Record {
   std::vector<std::uint8_t> value;
 };
 
+struct AppendRecord {
+  std::span<const std::uint8_t> key;
+  std::span<const std::uint8_t> value;
+};
+
 struct RecoveryStats {
   std::size_t segments_scanned{0};
   std::size_t indexes_rebuilt{0};
@@ -93,6 +98,7 @@ public:
   static PartitionLog open(PartitionLogOptions options);
 
   RecordMetadata append(std::span<const std::uint8_t> key, std::span<const std::uint8_t> value);
+  std::vector<RecordMetadata> append_batch(std::span<const AppendRecord> records);
   std::vector<Record> read_from(std::uint64_t offset, std::size_t max_records,
                                 std::uintmax_t max_bytes) const;
   RetentionStats apply_retention(const RetentionPolicy& policy);

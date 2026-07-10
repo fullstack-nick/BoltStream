@@ -17,7 +17,9 @@ struct Endpoint {
 struct ServerOptions {
   Endpoint listen{"0.0.0.0", 9000};
   Endpoint admin_listen{"127.0.0.1", 9100};
+  std::uint32_t io_workers{1};
   std::filesystem::path data_dir{"./data"};
+  std::uint32_t append_batch_records{1};
   std::uint32_t max_frame_bytes{1024 * 1024};
   std::uint32_t max_fetch_records{100};
   std::uint32_t max_fetch_bytes{1024 * 1024};

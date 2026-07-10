@@ -98,6 +98,7 @@ else()
 endif()
 
 add_library(boltstream_core
+  src/benchmark/statistics.cpp
   src/broker/group_coordinator.cpp
   src/broker/options.cpp
   src/broker/server.cpp
@@ -135,7 +136,7 @@ add_executable(boltstream-consumer tools/consumer_cli.cpp)
 target_link_libraries(boltstream-consumer PRIVATE boltstream_core boltstream_warnings)
 
 add_executable(boltstream-bench tools/bench_cli.cpp)
-target_link_libraries(boltstream-bench PRIVATE boltstream_warnings)
+target_link_libraries(boltstream-bench PRIVATE boltstream_core boltstream_warnings)
 
 add_executable(boltstream-logtool tools/logtool_cli.cpp)
 target_link_libraries(boltstream-logtool PRIVATE boltstream_core boltstream_warnings)
@@ -165,6 +166,7 @@ if(BOLTSTREAM_BUILD_TESTS AND BUILD_TESTING)
   FetchContent_MakeAvailable(googletest)
 
   add_executable(boltstream_tests
+    tests/benchmark_statistics_tests.cpp
     tests/build_info_tests.cpp
     tests/client_broker_tests.cpp
     tests/config_tests.cpp
@@ -189,14 +191,16 @@ if(BOLTSTREAM_BUILD_BENCHMARKS)
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
   FetchContent_MakeAvailable(googlebenchmark)
 
-  add_executable(boltstream_placeholder_bench benchmarks/placeholder_bench.cpp)
+  add_executable(boltstream-microbench benchmarks/microbench.cpp)
   if(TARGET benchmark)
     target_compile_options(benchmark PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c2y-extensions>)
   endif()
   if(TARGET benchmark_main)
     target_compile_options(benchmark_main PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c2y-extensions>)
   endif()
-  target_compile_options(boltstream_placeholder_bench
+  target_compile_options(boltstream-microbench
                          PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c2y-extensions>)
-  target_link_libraries(boltstream_placeholder_bench PRIVATE benchmark::benchmark boltstream_warnings)
+  target_link_libraries(boltstream-microbench
+                        PRIVATE benchmark::benchmark boltstream_core boltstream_warnings)
+  install(TARGETS boltstream-microbench RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
