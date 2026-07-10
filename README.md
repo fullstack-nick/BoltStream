@@ -133,3 +133,5 @@ Phase 5 evidence is recorded in [proof/phase-5.md](proof/phase-5.md). Phase 6 ev
 is recorded in [proof/phase-6.md](proof/phase-6.md). Phase 7 evidence is recorded in
 [proof/phase-7.md](proof/phase-7.md) after live coordinated group proof. Phase 8 evidence
 is recorded in [proof/phase-8.md](proof/phase-8.md) after live retention and lifecycle proof.
+Phase 9 evidence is recorded in [proof/phase-9.md](proof/phase-9.md) after exact-artifact
+GCP metrics, operations-stack, structured-log, alert, dashboard, and cleanup proof.
