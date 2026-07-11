@@ -121,6 +121,17 @@ done
 version=`$(curl -fsS http://127.0.0.1:9100/version)
 case "`$version" in *"`$SHA"*) ;; *) echo "profile runtime SHA mismatch: `$version" >&2; exit 1;; esac
 
+wait_ready() {
+  for attempt in {1..60}; do
+    if curl -fsS http://127.0.0.1:9100/health/ready >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "broker did not become ready" >&2
+  return 1
+}
+
 run_bench() {
   workload="`$1"
   messages="`$2"
@@ -136,9 +147,32 @@ run_bench() {
     --server-log-level warn --json-out '`$output'" >/dev/null
 }
 
+run_fetch_bench() {
+  output="$RemotePrefix-fetch-throughput.json"
+  topic='phase10-fetch-$ProfileName-r$Round'
+  sudo -u boltstream bash -c "set -a; source /etc/boltstream/boltstream.env; exec /opt/boltstream/current/bin/boltstream-admin topics create \\
+    --topic '`$topic' --partitions 4 --host 127.0.0.1 --port 9000" >/dev/null
+  sudo systemctl stop boltstream.service
+  sudo -u boltstream /opt/boltstream/current/bin/boltstream-bench prepare-fetch \\
+    --data-dir "`$DATA" --topic "`$topic" --partitions 4 --messages '$FetchMessages' \\
+    --payload-bytes 256 --key-bytes 16 --preload-batch-records 1024 >/dev/null
+  sudo systemctl start boltstream.service
+  wait_ready
+  sudo -u boltstream bash -c "set -a; source /etc/boltstream/boltstream.env; exec /opt/boltstream/current/bin/boltstream-bench run \\
+    --workload fetch-throughput --host 127.0.0.1 --port 9000 --admin-port 9100 \\
+    --profile '$ProfileName' --environment gcp-e2-micro --machine-type e2-micro \\
+    --topic '`$topic' --skip-preload --preload-batch-records 1024 \\
+    --partitions 4 --clients '$Clients' --duration-seconds '$Duration' \\
+    --warmup-seconds '$WarmupSeconds' --messages '$FetchMessages' \\
+    --warmup-messages '$WarmupMessages' --payload-bytes 256 --key-bytes 16 --repetitions 1 \\
+    --server-io-workers '$($Metadata.Io)' --server-append-workers '$($Metadata.Append)' \\
+    --server-append-batch-records '$($Metadata.Batch)' --server-queue-depth 1024 \\
+    --server-log-level warn --json-out '`$output'" >/dev/null
+}
+
 run_bench produce-throughput '$Messages'
 run_bench produce-latency '$Messages'
-run_bench fetch-throughput '$FetchMessages'
+run_fetch_bench
 curl -fsS http://127.0.0.1:9100/health/ready >/dev/null
 "@
       [System.IO.File]::WriteAllText($LocalScript, $Script.Replace("`r`n", "`n"), [System.Text.Encoding]::ASCII)

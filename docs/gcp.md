@@ -26,6 +26,14 @@ service to be active, ready, and still report the deployed SHA. Publish only aft
 `terraform plan -detailed-exitcode` returns zero and the full authenticated live
 regression passes.
 
+For fetch throughput, the 250,000-record preload is untimed setup. The runner creates
+the disposable topic through the authenticated broker, stops only the isolated
+benchmark service, uses `boltstream-bench prepare-fetch` to append deterministic
+records in storage batches of 1,024, and restarts the exact target profile. Four
+authenticated partition-specific consumers then time and verify the complete read.
+Raw JSON labels the setup method and batch size; direct storage preparation is never
+reported as broker produce throughput.
+
 ## Locked Target
 
 - GCP account: `nickaccturk@gmail.com`

@@ -1,6 +1,7 @@
 #include "boltstream/benchmark/statistics.h"
 #include "boltstream/build_info.h"
 #include "boltstream/protocol/protocol.h"
+#include "boltstream/storage/partition_log.h"
 
 #include <boost/asio.hpp>
 
@@ -55,6 +56,8 @@ struct Options {
   std::string environment{"local"};
   std::string machine_type{"unspecified"};
   std::string topic_prefix{"phase10-bench"};
+  std::string topic;
+  std::filesystem::path data_dir;
   std::uint32_t partitions{4};
   std::uint32_t clients{16};
   std::uint32_t duration_seconds{30};
@@ -65,6 +68,8 @@ struct Options {
   std::uint32_t key_bytes{16};
   std::uint32_t repetitions{1};
   std::uint32_t timeout_ms{30000};
+  std::uint32_t preload_batch_records{1024};
+  bool skip_preload{false};
   std::uint32_t server_io_workers{0};
   std::uint32_t server_append_workers{0};
   std::uint32_t server_append_batch_records{0};
@@ -97,16 +102,20 @@ void usage() {
   std::cout
       << "Usage:\n"
          "  boltstream-bench --dry-run\n"
+         "  boltstream-bench prepare-fetch --data-dir PATH --topic NAME [setup options]\n"
          "  boltstream-bench run --workload produce-throughput|produce-latency|fetch-throughput\n"
          "      [--host HOST] [--port PORT] [--admin-port PORT] [--token TOKEN]\n"
          "      [--profile NAME] [--environment NAME] [--machine-type NAME]\n"
-         "      [--topic-prefix NAME] [--partitions N] [--clients N]\n"
+         "      [--topic-prefix NAME] [--topic NAME --skip-preload] [--partitions N] [--clients "
+         "N]\n"
          "      [--duration-seconds N] [--warmup-seconds N] [--messages N]\n"
          "      [--warmup-messages N] [--payload-bytes N] [--key-bytes N]\n"
          "      [--repetitions N] [--timeout-ms N] [--json-out PATH]\n"
          "      [--markdown-out PATH] [--server-io-workers N]\n"
          "      [--server-append-workers N] [--server-append-batch-records N]\n"
          "      [--server-queue-depth N] [--server-log-level LEVEL]\n";
+  std::cout << "Setup options: [--partitions N] [--messages N] [--payload-bytes N] "
+               "[--key-bytes N] [--preload-batch-records N] [--json-out PATH]\n";
 }
 
 std::string json_escape(std::string_view value) {
@@ -387,6 +396,50 @@ std::vector<std::uint8_t> payload(std::uint32_t bytes) {
   return value;
 }
 
+std::uint64_t partition_record_count(std::uint64_t total, std::uint32_t partition,
+                                     std::uint32_t partitions) {
+  return total / partitions + (partition < total % partitions ? 1U : 0U);
+}
+
+void prepare_fetch_storage(const Options& options) {
+  if (options.data_dir.empty() || options.topic.empty()) {
+    throw std::invalid_argument("prepare-fetch requires --data-dir and --topic");
+  }
+  if (!boltstream::storage::is_valid_topic_name(options.topic)) {
+    throw std::invalid_argument("prepare-fetch topic is invalid");
+  }
+  if (options.preload_batch_records == 0 || options.preload_batch_records > 1024) {
+    throw std::invalid_argument("--preload-batch-records must be between 1 and 1024");
+  }
+
+  const auto message = payload(options.payload_bytes);
+  std::uint64_t appended = 0;
+  for (std::uint32_t partition = 0; partition < options.partitions; ++partition) {
+    auto log = boltstream::storage::PartitionLog::open(
+        {options.data_dir, options.topic, static_cast<std::uint16_t>(partition)});
+    if (log.next_offset() != 0) {
+      throw std::runtime_error("prepare-fetch requires empty partitions");
+    }
+    const auto key = key_for_partition(options.key_bytes, static_cast<std::uint16_t>(partition),
+                                       static_cast<std::uint16_t>(options.partitions));
+    auto remaining = partition_record_count(options.messages, partition, options.partitions);
+    while (remaining > 0) {
+      const auto count = static_cast<std::size_t>(
+          std::min<std::uint64_t>(remaining, options.preload_batch_records));
+      std::vector<boltstream::storage::AppendRecord> records(count, {key, message});
+      const auto metadata = log.append_batch(records);
+      if (metadata.size() != count) {
+        throw std::runtime_error("prepare-fetch appended an incomplete batch");
+      }
+      appended += metadata.size();
+      remaining -= metadata.size();
+    }
+  }
+  if (appended != options.messages) {
+    throw std::runtime_error("prepare-fetch record count mismatch");
+  }
+}
+
 Sample combine_threads(std::vector<ThreadResult>& threads, Clock::time_point started,
                        Clock::time_point finished) {
   Sample sample;
@@ -545,10 +598,18 @@ Sample run_fixed_produce(const Options& options, std::string_view topic, std::ui
 
 Sample run_fetch_throughput(const Options& options, std::string_view topic) {
   std::vector<std::uint64_t> partition_counts;
-  const auto preload =
-      run_fixed_produce(options, topic, options.messages, 0, false, &partition_counts);
-  if (preload.errors != 0 || preload.records != options.messages) {
-    throw std::runtime_error("fetch preload did not produce the requested records");
+  if (options.skip_preload) {
+    partition_counts.resize(options.partitions);
+    for (std::uint32_t partition = 0; partition < options.partitions; ++partition) {
+      partition_counts[partition] =
+          partition_record_count(options.messages, partition, options.partitions);
+    }
+  } else {
+    const auto preload =
+        run_fixed_produce(options, topic, options.messages, 0, false, &partition_counts);
+    if (preload.errors != 0 || preload.records != options.messages) {
+      throw std::runtime_error("fetch preload did not produce the requested records");
+    }
   }
 
   std::vector<std::unique_ptr<ProtocolClient>> clients;
@@ -707,7 +768,9 @@ std::string render_json(const Options& options, const std::vector<Sample>& sampl
       << ",\"warmup_seconds\":" << options.warmup_seconds << ",\"messages\":" << options.messages
       << ",\"warmup_messages\":" << options.warmup_messages
       << ",\"payload_bytes\":" << options.payload_bytes << ",\"key_bytes\":" << options.key_bytes
-      << ",\"timeout_ms\":" << options.timeout_ms << "},\n";
+      << ",\"timeout_ms\":" << options.timeout_ms << ",\"preload_method\":\""
+      << (options.skip_preload ? "direct-batched-storage-setup" : "authenticated-protocol")
+      << "\",\"preload_batch_records\":" << options.preload_batch_records << "},\n";
   out << "  \"repetitions\":[\n";
   for (std::size_t index = 0; index < samples.size(); ++index) {
     const auto& sample = samples[index];
@@ -820,6 +883,10 @@ Options parse_options(int argc, char** argv) {
       options.machine_type = value();
     } else if (arg == "--topic-prefix") {
       options.topic_prefix = value();
+    } else if (arg == "--topic") {
+      options.topic = value();
+    } else if (arg == "--data-dir") {
+      options.data_dir = value();
     } else if (arg == "--partitions") {
       u32(options.partitions);
     } else if (arg == "--clients") {
@@ -840,6 +907,10 @@ Options parse_options(int argc, char** argv) {
       u32(options.repetitions);
     } else if (arg == "--timeout-ms") {
       u32(options.timeout_ms);
+    } else if (arg == "--preload-batch-records") {
+      u32(options.preload_batch_records);
+    } else if (arg == "--skip-preload") {
+      options.skip_preload = true;
     } else if (arg == "--server-io-workers") {
       u32(options.server_io_workers);
     } else if (arg == "--server-append-workers") {
@@ -863,9 +934,16 @@ Options parse_options(int argc, char** argv) {
     throw std::invalid_argument("invalid --workload");
   }
   if (options.partitions == 0 || options.partitions > std::numeric_limits<std::uint16_t>::max() ||
-      options.clients == 0 || options.repetitions == 0 || options.payload_bytes == 0) {
+      options.clients == 0 || options.repetitions == 0 || options.messages == 0 ||
+      options.payload_bytes == 0) {
     throw std::invalid_argument(
-        "partitions, clients, repetitions, and payload bytes must be nonzero");
+        "partitions, clients, repetitions, messages, and payload bytes must be nonzero");
+  }
+  if (options.preload_batch_records == 0 || options.preload_batch_records > 1024) {
+    throw std::invalid_argument("--preload-batch-records must be between 1 and 1024");
+  }
+  if (options.skip_preload && (options.workload != "fetch-throughput" || options.topic.empty())) {
+    throw std::invalid_argument("--skip-preload requires fetch-throughput and --topic");
   }
   return options;
 }
@@ -883,6 +961,25 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (argc < 2 || std::string_view{argv[1]} != "run") {
+    if (argc >= 2 && std::string_view{argv[1]} == "prepare-fetch") {
+      try {
+        const auto options = parse_options(argc, argv);
+        prepare_fetch_storage(options);
+        const auto output =
+            "{\"service\":\"boltstream-bench\",\"status\":\"prepared\",\"topic\":\"" +
+            json_escape(options.topic) + "\",\"records\":" + std::to_string(options.messages) +
+            "}\n";
+        write_output(options.json_out, output);
+        std::cout << output;
+        return 0;
+      } catch (const std::invalid_argument& error) {
+        std::cerr << "boltstream-bench: " << error.what() << '\n';
+        return 2;
+      } catch (const std::exception& error) {
+        std::cerr << "boltstream-bench: fetch preparation failed: " << error.what() << '\n';
+        return 3;
+      }
+    }
     usage();
     return 2;
   }
@@ -892,10 +989,14 @@ int main(int argc, char** argv) {
     std::vector<Sample> samples;
     samples.reserve(options.repetitions);
     for (std::uint32_t repetition = 0; repetition < options.repetitions; ++repetition) {
-      const auto topic = options.topic_prefix + "-" +
-                         std::to_string(Clock::now().time_since_epoch().count()) + "-" +
-                         std::to_string(repetition);
-      create_topic(options, topic);
+      const auto topic = options.topic.empty()
+                             ? options.topic_prefix + "-" +
+                                   std::to_string(Clock::now().time_since_epoch().count()) + "-" +
+                                   std::to_string(repetition)
+                             : options.topic;
+      if (options.topic.empty()) {
+        create_topic(options, topic);
+      }
       try {
         const auto before = http_get(options, "/metrics");
         Sample sample;

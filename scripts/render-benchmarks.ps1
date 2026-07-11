@@ -82,6 +82,28 @@ foreach ($File in $Files) {
       $Document.workload.payload_bytes -ne 256 -or $Document.workload.key_bytes -ne 16) {
     throw "$($File.Name) does not match the headline topology and payload contract."
   }
+  switch ($Document.workload.name) {
+    "produce-throughput" {
+      if ($Document.workload.duration_seconds -ne 30 -or
+          $Document.workload.warmup_seconds -ne 60) {
+        throw "$($File.Name) does not match the produce-throughput timing contract."
+      }
+    }
+    "produce-latency" {
+      if ($Document.workload.messages -ne 100000 -or
+          $Document.workload.warmup_messages -ne 10000) {
+        throw "$($File.Name) does not match the produce-latency message contract."
+      }
+    }
+    "fetch-throughput" {
+      if ($Document.workload.messages -ne 250000 -or
+          $Document.workload.preload_method -ne "direct-batched-storage-setup" -or
+          $Document.workload.preload_batch_records -ne 1024) {
+        throw "$($File.Name) does not match the fetch preload and count contract."
+      }
+    }
+    default { throw "$($File.Name) has an unknown workload." }
+  }
   $Document | Add-Member -NotePropertyName _round -NotePropertyValue ([int]$RoundMatch.Groups['round'].Value)
   $Document | Add-Member -NotePropertyName _source_file -NotePropertyValue $File.Name
   $Documents += $Document
@@ -275,6 +297,8 @@ foreach ($Result in $Results) {
   }
 }
 $MarkdownLines += @(
+  "",
+  "Fetch setup is excluded from the timed result: each disposable topic is created through the authenticated broker, deterministically preloaded while the isolated broker is stopped using storage batches of 1,024, and then read and fully verified through four authenticated partition-specific consumers after the exact target profile restarts.",
   "",
   "The original 100k/400k/750k targets remain aspirational developer-class goals, not Phase 10 completion gates. Full per-repetition results, batch counters, workload parameters, and dispersion data are stored in [the canonical JSON](../benchmarks/results/phase-10-gcp-e2-micro.json). Native Windows Release measurements are documented [separately](benchmarks-windows.md).",
   ""

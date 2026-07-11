@@ -1168,7 +1168,13 @@ live GCP proof path.
 - GCP acknowledged produce latency: the same loaded topology, 10,000 warmup records,
   then 100,000 measured records.
 - GCP fetch throughput: preload 250,000 records, then use four partition-specific
-  consumers to verify every record from the beginning.
+  consumers to verify every record from the beginning. The untimed setup creates the
+  topic through the authenticated broker, stops that isolated profile, writes the
+  deterministic records with `boltstream-bench prepare-fetch` in storage batches of
+  1,024, then restarts the same profile before the authenticated timed read. The JSON
+  labels this `direct-batched-storage-setup`; setup time is excluded, but every fetched
+  key, value, partition, offset, and total count is verified. Normal `run
+  --workload fetch-throughput` retains its authenticated protocol preload.
 - Run five rounds with profile order rotated by round. Publish medians, min/max, and
   coefficient of variation. If produce-throughput CV exceeds 15%, run five more
   rounds and retain all samples; persistent shared-core instability is labeled, never
