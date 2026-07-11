@@ -109,7 +109,7 @@ $Consolidated = [ordered]@{
   }
   results = $Results
 }
-$JsonText = ($Consolidated | ConvertTo-Json -Depth 20) + "`n"
+$JsonText = (($Consolidated | ConvertTo-Json -Depth 20).Replace("`r`n", "`n")) + "`n"
 
 $Lines = @(
   "# Native Windows Release Benchmarks",

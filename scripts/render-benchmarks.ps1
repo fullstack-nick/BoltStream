@@ -259,7 +259,7 @@ $Canonical = [ordered]@{
   }
   results = $Results
 }
-$CanonicalText = ($Canonical | ConvertTo-Json -Depth 20) + "`n"
+$CanonicalText = (($Canonical | ConvertTo-Json -Depth 20).Replace("`r`n", "`n")) + "`n"
 
 function Find-Workload($ProfileResult, [string]$Name) {
   return $ProfileResult.workloads | Where-Object { $_.name -eq $Name } | Select-Object -First 1
