@@ -1,0 +1,937 @@
+{
+    "schema_version":  1,
+    "generated_at_utc":  "2026-07-11T13:01:47Z",
+    "source_git_sha":  "14d225abe1d5",
+    "environment":  {
+                        "kind":  "gcp-e2-micro",
+                        "machine_type":  "e2-micro",
+                        "cpu_model":  "AMD EPYC 7B12",
+                        "logical_cpus":  2,
+                        "memory_bytes":  1001922560,
+                        "os":  "Linux 6.17.0-1020-gcp",
+                        "compiler":  "GNU 13.3.0",
+                        "build_type":  "Release",
+                        "git_sha":  "14d225abe1d5",
+                        "protocol_version":  "4",
+                        "storage_format_version":  "2"
+                    },
+    "methodology":  {
+                        "primary_environment":  "GCP Ubuntu e2-micro",
+                        "transport":  "co-located loopback client and broker",
+                        "durability":  "flush",
+                        "profiles":  [
+                                         "single-threaded",
+                                         "worker-event-loops",
+                                         "batched-writes"
+                                     ],
+                        "profile_order":  "rotated across rounds",
+                        "headline":  "produce throughput and acknowledged produce latency",
+                        "recommended_profile":  "batched-writes",
+                        "profile_order_by_round":  [
+                                                       {
+                                                           "round":  1,
+                                                           "profiles":  [
+                                                                            "single-threaded",
+                                                                            "worker-event-loops",
+                                                                            "batched-writes"
+                                                                        ]
+                                                       },
+                                                       {
+                                                           "round":  2,
+                                                           "profiles":  [
+                                                                            "worker-event-loops",
+                                                                            "batched-writes",
+                                                                            "single-threaded"
+                                                                        ]
+                                                       },
+                                                       {
+                                                           "round":  3,
+                                                           "profiles":  [
+                                                                            "batched-writes",
+                                                                            "single-threaded",
+                                                                            "worker-event-loops"
+                                                                        ]
+                                                       }
+                                                   ],
+                        "campaign_plan":  "five rotated rounds",
+                        "campaign_completion":  "two complete rounds for every profile plus round three for single-threaded and batched-writes",
+                        "sample_policy":  "all completed profile triplets retained; interrupted worker-event-loops round three excluded",
+                        "limited_sample":  true,
+                        "targets_are_release_gates":  false
+                    },
+    "results":  [
+                    {
+                        "profile":  "single-threaded",
+                        "broker":  {
+                                       "profile":  "single-threaded",
+                                       "io_workers":  1,
+                                       "append_workers":  0,
+                                       "append_batch_records":  1,
+                                       "append_queue_depth":  1024,
+                                       "durability":  "flush",
+                                       "metrics_enabled":  true,
+                                       "log_level":  "warn"
+                                   },
+                        "workloads":  [
+                                          {
+                                              "name":  "produce-throughput",
+                                              "configuration":  {
+                                                                    "name":  "produce-throughput",
+                                                                    "partitions":  4,
+                                                                    "clients":  16,
+                                                                    "duration_seconds":  30,
+                                                                    "warmup_seconds":  60,
+                                                                    "messages":  100000,
+                                                                    "warmup_messages":  10000,
+                                                                    "payload_bytes":  256,
+                                                                    "key_bytes":  16,
+                                                                    "timeout_ms":  30000,
+                                                                    "preload_method":  "authenticated-protocol",
+                                                                    "preload_batch_records":  1024
+                                                                },
+                                              "repetitions":  [
+                                                                  {
+                                                                      "round":  1,
+                                                                      "generated_at_utc":  "2026-07-11T08:59:55Z",
+                                                                      "records":  2142,
+                                                                      "bytes":  668304,
+                                                                      "seconds":  30.120,
+                                                                      "records_per_second":  71.116,
+                                                                      "mebibytes_per_second":  0.021,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  50255,
+                                                                      "append_batch_records":  50255
+                                                                  },
+                                                                  {
+                                                                      "round":  2,
+                                                                      "generated_at_utc":  "2026-07-11T11:34:13Z",
+                                                                      "records":  3750,
+                                                                      "bytes":  1170000,
+                                                                      "seconds":  30.010,
+                                                                      "records_per_second":  124.958,
+                                                                      "mebibytes_per_second":  0.037,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  35956,
+                                                                      "append_batch_records":  35956
+                                                                  },
+                                                                  {
+                                                                      "round":  3,
+                                                                      "generated_at_utc":  "2026-07-11T12:24:41Z",
+                                                                      "records":  3148,
+                                                                      "bytes":  982176,
+                                                                      "seconds":  30.158,
+                                                                      "records_per_second":  104.383,
+                                                                      "mebibytes_per_second":  0.031,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  31483,
+                                                                      "append_batch_records":  31483
+                                                                  }
+                                                              ],
+                                              "summary":  {
+                                                              "records_per_second":  {
+                                                                                         "median":  104.383,
+                                                                                         "min":  71.116,
+                                                                                         "max":  124.958,
+                                                                                         "cv_percent":  27.12785164078802
+                                                                                     },
+                                                              "mebibytes_per_second":  {
+                                                                                           "median":  0.031,
+                                                                                           "min":  0.021,
+                                                                                           "max":  0.037,
+                                                                                           "cv_percent":  27.245743040409309
+                                                                                       },
+                                                              "latency_us":  {
+                                                                                 "p50":  0,
+                                                                                 "p95":  0,
+                                                                                 "p99":  0,
+                                                                                 "max":  0
+                                                                             },
+                                                              "record_count":  9040,
+                                                              "error_count":  0,
+                                                              "append_batches":  117694,
+                                                              "append_batch_records":  117694,
+                                                              "instability_warning":  true
+                                                          }
+                                          },
+                                          {
+                                              "name":  "produce-latency",
+                                              "configuration":  {
+                                                                    "name":  "produce-latency",
+                                                                    "partitions":  4,
+                                                                    "clients":  16,
+                                                                    "duration_seconds":  30,
+                                                                    "warmup_seconds":  60,
+                                                                    "messages":  100000,
+                                                                    "warmup_messages":  10000,
+                                                                    "payload_bytes":  256,
+                                                                    "key_bytes":  16,
+                                                                    "timeout_ms":  30000,
+                                                                    "preload_method":  "authenticated-protocol",
+                                                                    "preload_batch_records":  1024
+                                                                },
+                                              "repetitions":  [
+                                                                  {
+                                                                      "round":  1,
+                                                                      "generated_at_utc":  "2026-07-11T09:35:39Z",
+                                                                      "records":  100000,
+                                                                      "bytes":  31200000,
+                                                                      "seconds":  2126.496,
+                                                                      "records_per_second":  47.026,
+                                                                      "mebibytes_per_second":  0.014,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  260349.302,
+                                                                                         "p95":  740377.497,
+                                                                                         "p99":  751561.156,
+                                                                                         "max":  1992654.750
+                                                                                     },
+                                                                      "append_batches":  110000,
+                                                                      "append_batch_records":  110000
+                                                                  },
+                                                                  {
+                                                                      "round":  2,
+                                                                      "generated_at_utc":  "2026-07-11T12:07:46Z",
+                                                                      "records":  100000,
+                                                                      "bytes":  31200000,
+                                                                      "seconds":  1995.235,
+                                                                      "records_per_second":  50.119,
+                                                                      "mebibytes_per_second":  0.015,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  252484.233,
+                                                                                         "p95":  741374.534,
+                                                                                         "p99":  753321.145,
+                                                                                         "max":  1226683.983
+                                                                                     },
+                                                                      "append_batches":  110000,
+                                                                      "append_batch_records":  110000
+                                                                  },
+                                                                  {
+                                                                      "round":  3,
+                                                                      "generated_at_utc":  "2026-07-11T13:00:52Z",
+                                                                      "records":  100000,
+                                                                      "bytes":  31200000,
+                                                                      "seconds":  2153.745,
+                                                                      "records_per_second":  46.431,
+                                                                      "mebibytes_per_second":  0.014,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  258644.424,
+                                                                                         "p95":  748898.366,
+                                                                                         "p99":  972501.774,
+                                                                                         "max":  1242206.358
+                                                                                     },
+                                                                      "append_batches":  110000,
+                                                                      "append_batch_records":  110000
+                                                                  }
+                                                              ],
+                                              "summary":  {
+                                                              "records_per_second":  {
+                                                                                         "median":  47.026,
+                                                                                         "min":  46.431,
+                                                                                         "max":  50.119,
+                                                                                         "cv_percent":  4.13714810795742
+                                                                                     },
+                                                              "mebibytes_per_second":  {
+                                                                                           "median":  0.014,
+                                                                                           "min":  0.014,
+                                                                                           "max":  0.015,
+                                                                                           "cv_percent":  4.0280251338811084
+                                                                                       },
+                                                              "latency_us":  {
+                                                                                 "p50":  258644.424,
+                                                                                 "p95":  741374.534,
+                                                                                 "p99":  753321.145,
+                                                                                 "max":  1992654.75
+                                                                             },
+                                                              "record_count":  300000,
+                                                              "error_count":  0,
+                                                              "append_batches":  330000,
+                                                              "append_batch_records":  330000,
+                                                              "instability_warning":  false
+                                                          }
+                                          },
+                                          {
+                                              "name":  "fetch-throughput",
+                                              "configuration":  {
+                                                                    "name":  "fetch-throughput",
+                                                                    "partitions":  4,
+                                                                    "clients":  16,
+                                                                    "duration_seconds":  30,
+                                                                    "warmup_seconds":  60,
+                                                                    "messages":  250000,
+                                                                    "warmup_messages":  10000,
+                                                                    "payload_bytes":  256,
+                                                                    "key_bytes":  16,
+                                                                    "timeout_ms":  30000,
+                                                                    "preload_method":  "direct-batched-storage-setup",
+                                                                    "preload_batch_records":  1024
+                                                                },
+                                              "repetitions":  [
+                                                                  {
+                                                                      "round":  1,
+                                                                      "generated_at_utc":  "2026-07-11T09:36:33Z",
+                                                                      "records":  250000,
+                                                                      "bytes":  78000000,
+                                                                      "seconds":  22.724,
+                                                                      "records_per_second":  11001.372,
+                                                                      "mebibytes_per_second":  3.273,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  0,
+                                                                      "append_batch_records":  0
+                                                                  },
+                                                                  {
+                                                                      "round":  2,
+                                                                      "generated_at_utc":  "2026-07-11T12:08:41Z",
+                                                                      "records":  250000,
+                                                                      "bytes":  78000000,
+                                                                      "seconds":  23.759,
+                                                                      "records_per_second":  10522.436,
+                                                                      "mebibytes_per_second":  3.131,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  0,
+                                                                      "append_batch_records":  0
+                                                                  },
+                                                                  {
+                                                                      "round":  3,
+                                                                      "generated_at_utc":  "2026-07-11T13:01:47Z",
+                                                                      "records":  250000,
+                                                                      "bytes":  78000000,
+                                                                      "seconds":  23.749,
+                                                                      "records_per_second":  10526.729,
+                                                                      "mebibytes_per_second":  3.132,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  0,
+                                                                      "append_batch_records":  0
+                                                                  }
+                                                              ],
+                                              "summary":  {
+                                                              "records_per_second":  {
+                                                                                         "median":  10526.729,
+                                                                                         "min":  10522.436,
+                                                                                         "max":  11001.372,
+                                                                                         "cv_percent":  2.5767079805274049
+                                                                                     },
+                                                              "mebibytes_per_second":  {
+                                                                                           "median":  3.132,
+                                                                                           "min":  3.131,
+                                                                                           "max":  3.273,
+                                                                                           "cv_percent":  2.5701528887234448
+                                                                                       },
+                                                              "latency_us":  {
+                                                                                 "p50":  0,
+                                                                                 "p95":  0,
+                                                                                 "p99":  0,
+                                                                                 "max":  0
+                                                                             },
+                                                              "record_count":  750000,
+                                                              "error_count":  0,
+                                                              "append_batches":  0,
+                                                              "append_batch_records":  0,
+                                                              "instability_warning":  false
+                                                          }
+                                          }
+                                      ]
+                    },
+                    {
+                        "profile":  "worker-event-loops",
+                        "broker":  {
+                                       "profile":  "worker-event-loops",
+                                       "io_workers":  2,
+                                       "append_workers":  2,
+                                       "append_batch_records":  1,
+                                       "append_queue_depth":  1024,
+                                       "durability":  "flush",
+                                       "metrics_enabled":  true,
+                                       "log_level":  "warn"
+                                   },
+                        "workloads":  [
+                                          {
+                                              "name":  "produce-throughput",
+                                              "configuration":  {
+                                                                    "name":  "produce-throughput",
+                                                                    "partitions":  4,
+                                                                    "clients":  16,
+                                                                    "duration_seconds":  30,
+                                                                    "warmup_seconds":  60,
+                                                                    "messages":  100000,
+                                                                    "warmup_messages":  10000,
+                                                                    "payload_bytes":  256,
+                                                                    "key_bytes":  16,
+                                                                    "timeout_ms":  30000,
+                                                                    "preload_method":  "authenticated-protocol",
+                                                                    "preload_batch_records":  1024
+                                                                },
+                                              "repetitions":  [
+                                                                  {
+                                                                      "round":  1,
+                                                                      "generated_at_utc":  "2026-07-11T09:38:45Z",
+                                                                      "records":  2041,
+                                                                      "bytes":  636792,
+                                                                      "seconds":  30.413,
+                                                                      "records_per_second":  67.109,
+                                                                      "mebibytes_per_second":  0.020,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  34302,
+                                                                      "append_batch_records":  34302
+                                                                  },
+                                                                  {
+                                                                      "round":  2,
+                                                                      "generated_at_utc":  "2026-07-11T10:39:59Z",
+                                                                      "records":  3539,
+                                                                      "bytes":  1104168,
+                                                                      "seconds":  30.219,
+                                                                      "records_per_second":  117.113,
+                                                                      "mebibytes_per_second":  0.035,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  34634,
+                                                                      "append_batch_records":  34634
+                                                                  }
+                                                              ],
+                                              "summary":  {
+                                                              "records_per_second":  {
+                                                                                         "median":  92.11099999999999,
+                                                                                         "min":  67.109,
+                                                                                         "max":  117.113,
+                                                                                         "cv_percent":  38.386476627603791
+                                                                                     },
+                                                              "mebibytes_per_second":  {
+                                                                                           "median":  0.027500000000000004,
+                                                                                           "min":  0.02,
+                                                                                           "max":  0.035,
+                                                                                           "cv_percent":  38.569460791993507
+                                                                                       },
+                                                              "latency_us":  {
+                                                                                 "p50":  0,
+                                                                                 "p95":  0,
+                                                                                 "p99":  0,
+                                                                                 "max":  0
+                                                                             },
+                                                              "record_count":  5580,
+                                                              "error_count":  0,
+                                                              "append_batches":  68936,
+                                                              "append_batch_records":  68936,
+                                                              "instability_warning":  true
+                                                          }
+                                          },
+                                          {
+                                              "name":  "produce-latency",
+                                              "configuration":  {
+                                                                    "name":  "produce-latency",
+                                                                    "partitions":  4,
+                                                                    "clients":  16,
+                                                                    "duration_seconds":  30,
+                                                                    "warmup_seconds":  60,
+                                                                    "messages":  100000,
+                                                                    "warmup_messages":  10000,
+                                                                    "payload_bytes":  256,
+                                                                    "key_bytes":  16,
+                                                                    "timeout_ms":  30000,
+                                                                    "preload_method":  "authenticated-protocol",
+                                                                    "preload_batch_records":  1024
+                                                                },
+                                              "repetitions":  [
+                                                                  {
+                                                                      "round":  1,
+                                                                      "generated_at_utc":  "2026-07-11T10:24:52Z",
+                                                                      "records":  100000,
+                                                                      "bytes":  31200000,
+                                                                      "seconds":  2749.987,
+                                                                      "records_per_second":  36.364,
+                                                                      "mebibytes_per_second":  0.011,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  504714.500,
+                                                                                         "p95":  747874.863,
+                                                                                         "p99":  762185.012,
+                                                                                         "max":  1492236.219
+                                                                                     },
+                                                                      "append_batches":  110000,
+                                                                      "append_batch_records":  110000
+                                                                  },
+                                                                  {
+                                                                      "round":  2,
+                                                                      "generated_at_utc":  "2026-07-11T11:18:51Z",
+                                                                      "records":  100000,
+                                                                      "bytes":  31200000,
+                                                                      "seconds":  2314.763,
+                                                                      "records_per_second":  43.201,
+                                                                      "mebibytes_per_second":  0.013,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  277299.455,
+                                                                                         "p95":  745036.225,
+                                                                                         "p99":  751214.225,
+                                                                                         "max":  1472276.963
+                                                                                     },
+                                                                      "append_batches":  110000,
+                                                                      "append_batch_records":  110000
+                                                                  }
+                                                              ],
+                                              "summary":  {
+                                                              "records_per_second":  {
+                                                                                         "median":  39.7825,
+                                                                                         "min":  36.364,
+                                                                                         "max":  43.201,
+                                                                                         "cv_percent":  12.152300792992969
+                                                                                     },
+                                                              "mebibytes_per_second":  {
+                                                                                           "median":  0.012,
+                                                                                           "min":  0.011,
+                                                                                           "max":  0.013,
+                                                                                           "cv_percent":  11.785113019775793
+                                                                                       },
+                                                              "latency_us":  {
+                                                                                 "p50":  391006.97750000004,
+                                                                                 "p95":  746455.544,
+                                                                                 "p99":  756699.6185,
+                                                                                 "max":  1492236.219
+                                                                             },
+                                                              "record_count":  200000,
+                                                              "error_count":  0,
+                                                              "append_batches":  220000,
+                                                              "append_batch_records":  220000,
+                                                              "instability_warning":  false
+                                                          }
+                                          },
+                                          {
+                                              "name":  "fetch-throughput",
+                                              "configuration":  {
+                                                                    "name":  "fetch-throughput",
+                                                                    "partitions":  4,
+                                                                    "clients":  16,
+                                                                    "duration_seconds":  30,
+                                                                    "warmup_seconds":  60,
+                                                                    "messages":  250000,
+                                                                    "warmup_messages":  10000,
+                                                                    "payload_bytes":  256,
+                                                                    "key_bytes":  16,
+                                                                    "timeout_ms":  30000,
+                                                                    "preload_method":  "direct-batched-storage-setup",
+                                                                    "preload_batch_records":  1024
+                                                                },
+                                              "repetitions":  [
+                                                                  {
+                                                                      "round":  1,
+                                                                      "generated_at_utc":  "2026-07-11T10:25:47Z",
+                                                                      "records":  250000,
+                                                                      "bytes":  78000000,
+                                                                      "seconds":  23.768,
+                                                                      "records_per_second":  10518.175,
+                                                                      "mebibytes_per_second":  3.130,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  0,
+                                                                      "append_batch_records":  0
+                                                                  },
+                                                                  {
+                                                                      "round":  2,
+                                                                      "generated_at_utc":  "2026-07-11T11:19:45Z",
+                                                                      "records":  250000,
+                                                                      "bytes":  78000000,
+                                                                      "seconds":  22.739,
+                                                                      "records_per_second":  10994.093,
+                                                                      "mebibytes_per_second":  3.271,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  0,
+                                                                      "append_batch_records":  0
+                                                                  }
+                                                              ],
+                                              "summary":  {
+                                                              "records_per_second":  {
+                                                                                         "median":  10756.134,
+                                                                                         "min":  10518.175,
+                                                                                         "max":  10994.093,
+                                                                                         "cv_percent":  3.1286784367760792
+                                                                                     },
+                                                              "mebibytes_per_second":  {
+                                                                                           "median":  3.2005,
+                                                                                           "min":  3.13,
+                                                                                           "max":  3.271,
+                                                                                           "cv_percent":  3.1152025042119424
+                                                                                       },
+                                                              "latency_us":  {
+                                                                                 "p50":  0,
+                                                                                 "p95":  0,
+                                                                                 "p99":  0,
+                                                                                 "max":  0
+                                                                             },
+                                                              "record_count":  500000,
+                                                              "error_count":  0,
+                                                              "append_batches":  0,
+                                                              "append_batch_records":  0,
+                                                              "instability_warning":  false
+                                                          }
+                                          }
+                                      ]
+                    },
+                    {
+                        "profile":  "batched-writes",
+                        "broker":  {
+                                       "profile":  "batched-writes",
+                                       "io_workers":  2,
+                                       "append_workers":  2,
+                                       "append_batch_records":  32,
+                                       "append_queue_depth":  1024,
+                                       "durability":  "flush",
+                                       "metrics_enabled":  true,
+                                       "log_level":  "warn"
+                                   },
+                        "workloads":  [
+                                          {
+                                              "name":  "produce-throughput",
+                                              "configuration":  {
+                                                                    "name":  "produce-throughput",
+                                                                    "partitions":  4,
+                                                                    "clients":  16,
+                                                                    "duration_seconds":  30,
+                                                                    "warmup_seconds":  60,
+                                                                    "messages":  100000,
+                                                                    "warmup_messages":  10000,
+                                                                    "payload_bytes":  256,
+                                                                    "key_bytes":  16,
+                                                                    "timeout_ms":  30000,
+                                                                    "preload_method":  "authenticated-protocol",
+                                                                    "preload_batch_records":  1024
+                                                                },
+                                              "repetitions":  [
+                                                                  {
+                                                                      "round":  1,
+                                                                      "generated_at_utc":  "2026-07-11T10:27:54Z",
+                                                                      "records":  5762,
+                                                                      "bytes":  1797744,
+                                                                      "seconds":  30.195,
+                                                                      "records_per_second":  190.829,
+                                                                      "mebibytes_per_second":  0.057,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  16820,
+                                                                      "append_batch_records":  62075
+                                                                  },
+                                                                  {
+                                                                      "round":  2,
+                                                                      "generated_at_utc":  "2026-07-11T11:22:01Z",
+                                                                      "records":  5402,
+                                                                      "bytes":  1685424,
+                                                                      "seconds":  30.042,
+                                                                      "records_per_second":  179.814,
+                                                                      "mebibytes_per_second":  0.054,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  17162,
+                                                                      "append_batch_records":  64254
+                                                                  },
+                                                                  {
+                                                                      "round":  3,
+                                                                      "generated_at_utc":  "2026-07-11T12:10:55Z",
+                                                                      "records":  5171,
+                                                                      "bytes":  1613352,
+                                                                      "seconds":  30.212,
+                                                                      "records_per_second":  171.158,
+                                                                      "mebibytes_per_second":  0.051,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  16666,
+                                                                      "append_batch_records":  61747
+                                                                  }
+                                                              ],
+                                              "summary":  {
+                                                              "records_per_second":  {
+                                                                                         "median":  179.814,
+                                                                                         "min":  171.158,
+                                                                                         "max":  190.829,
+                                                                                         "cv_percent":  5.4590412110474684
+                                                                                     },
+                                                              "mebibytes_per_second":  {
+                                                                                           "median":  0.054,
+                                                                                           "min":  0.051,
+                                                                                           "max":  0.057,
+                                                                                           "cv_percent":  5.5555555555555607
+                                                                                       },
+                                                              "latency_us":  {
+                                                                                 "p50":  0,
+                                                                                 "p95":  0,
+                                                                                 "p99":  0,
+                                                                                 "max":  0
+                                                                             },
+                                                              "record_count":  16335,
+                                                              "error_count":  0,
+                                                              "append_batches":  50648,
+                                                              "append_batch_records":  188076,
+                                                              "instability_warning":  false
+                                                          }
+                                          },
+                                          {
+                                              "name":  "produce-latency",
+                                              "configuration":  {
+                                                                    "name":  "produce-latency",
+                                                                    "partitions":  4,
+                                                                    "clients":  16,
+                                                                    "duration_seconds":  30,
+                                                                    "warmup_seconds":  60,
+                                                                    "messages":  100000,
+                                                                    "warmup_messages":  10000,
+                                                                    "payload_bytes":  256,
+                                                                    "key_bytes":  16,
+                                                                    "timeout_ms":  30000,
+                                                                    "preload_method":  "authenticated-protocol",
+                                                                    "preload_batch_records":  1024
+                                                                },
+                                              "repetitions":  [
+                                                                  {
+                                                                      "round":  1,
+                                                                      "generated_at_utc":  "2026-07-11T10:36:56Z",
+                                                                      "records":  100000,
+                                                                      "bytes":  31200000,
+                                                                      "seconds":  534.224,
+                                                                      "records_per_second":  187.187,
+                                                                      "mebibytes_per_second":  0.056,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  12962.789,
+                                                                                         "p95":  239158.397,
+                                                                                         "p99":  243026.096,
+                                                                                         "max":  729678.507
+                                                                                     },
+                                                                      "append_batches":  28928,
+                                                                      "append_batch_records":  110000
+                                                                  },
+                                                                  {
+                                                                      "round":  2,
+                                                                      "generated_at_utc":  "2026-07-11T11:31:06Z",
+                                                                      "records":  100000,
+                                                                      "bytes":  31200000,
+                                                                      "seconds":  536.513,
+                                                                      "records_per_second":  186.389,
+                                                                      "mebibytes_per_second":  0.055,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  12899.048,
+                                                                                         "p95":  239372.586,
+                                                                                         "p99":  243553.735,
+                                                                                         "max":  736640.335
+                                                                                     },
+                                                                      "append_batches":  28827,
+                                                                      "append_batch_records":  110000
+                                                                  },
+                                                                  {
+                                                                      "round":  3,
+                                                                      "generated_at_utc":  "2026-07-11T12:21:28Z",
+                                                                      "records":  100000,
+                                                                      "bytes":  31200000,
+                                                                      "seconds":  624.731,
+                                                                      "records_per_second":  160.069,
+                                                                      "mebibytes_per_second":  0.048,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  14380.097,
+                                                                                         "p95":  249914.055,
+                                                                                         "p99":  253878.884,
+                                                                                         "max":  970660.144
+                                                                                     },
+                                                                      "append_batches":  28949,
+                                                                      "append_batch_records":  110000
+                                                                  }
+                                                              ],
+                                              "summary":  {
+                                                              "records_per_second":  {
+                                                                                         "median":  186.389,
+                                                                                         "min":  160.069,
+                                                                                         "max":  187.187,
+                                                                                         "cv_percent":  8.6750823434455437
+                                                                                     },
+                                                              "mebibytes_per_second":  {
+                                                                                           "median":  0.055,
+                                                                                           "min":  0.048,
+                                                                                           "max":  0.056,
+                                                                                           "cv_percent":  8.2243376293220258
+                                                                                       },
+                                                              "latency_us":  {
+                                                                                 "p50":  12962.789,
+                                                                                 "p95":  239372.586,
+                                                                                 "p99":  243553.735,
+                                                                                 "max":  970660.144
+                                                                             },
+                                                              "record_count":  300000,
+                                                              "error_count":  0,
+                                                              "append_batches":  86704,
+                                                              "append_batch_records":  330000,
+                                                              "instability_warning":  false
+                                                          }
+                                          },
+                                          {
+                                              "name":  "fetch-throughput",
+                                              "configuration":  {
+                                                                    "name":  "fetch-throughput",
+                                                                    "partitions":  4,
+                                                                    "clients":  16,
+                                                                    "duration_seconds":  30,
+                                                                    "warmup_seconds":  60,
+                                                                    "messages":  250000,
+                                                                    "warmup_messages":  10000,
+                                                                    "payload_bytes":  256,
+                                                                    "key_bytes":  16,
+                                                                    "timeout_ms":  30000,
+                                                                    "preload_method":  "direct-batched-storage-setup",
+                                                                    "preload_batch_records":  1024
+                                                                },
+                                              "repetitions":  [
+                                                                  {
+                                                                      "round":  1,
+                                                                      "generated_at_utc":  "2026-07-11T10:37:51Z",
+                                                                      "records":  250000,
+                                                                      "bytes":  78000000,
+                                                                      "seconds":  23.523,
+                                                                      "records_per_second":  10628.022,
+                                                                      "mebibytes_per_second":  3.162,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  0,
+                                                                      "append_batch_records":  0
+                                                                  },
+                                                                  {
+                                                                      "round":  2,
+                                                                      "generated_at_utc":  "2026-07-11T11:32:00Z",
+                                                                      "records":  250000,
+                                                                      "bytes":  78000000,
+                                                                      "seconds":  22.528,
+                                                                      "records_per_second":  11097.091,
+                                                                      "mebibytes_per_second":  3.302,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  0,
+                                                                      "append_batch_records":  0
+                                                                  },
+                                                                  {
+                                                                      "round":  3,
+                                                                      "generated_at_utc":  "2026-07-11T12:22:26Z",
+                                                                      "records":  250000,
+                                                                      "bytes":  78000000,
+                                                                      "seconds":  24.984,
+                                                                      "records_per_second":  10006.520,
+                                                                      "mebibytes_per_second":  2.977,
+                                                                      "errors":  0,
+                                                                      "latency_us":  {
+                                                                                         "p50":  0.000,
+                                                                                         "p95":  0.000,
+                                                                                         "p99":  0.000,
+                                                                                         "max":  0.000
+                                                                                     },
+                                                                      "append_batches":  0,
+                                                                      "append_batch_records":  0
+                                                                  }
+                                                              ],
+                                              "summary":  {
+                                                              "records_per_second":  {
+                                                                                         "median":  10628.022,
+                                                                                         "min":  10006.52,
+                                                                                         "max":  11097.091,
+                                                                                         "cv_percent":  5.1720451397121243
+                                                                                     },
+                                                              "mebibytes_per_second":  {
+                                                                                           "median":  3.162,
+                                                                                           "min":  2.977,
+                                                                                           "max":  3.302,
+                                                                                           "cv_percent":  5.1801208728633981
+                                                                                       },
+                                                              "latency_us":  {
+                                                                                 "p50":  0,
+                                                                                 "p95":  0,
+                                                                                 "p99":  0,
+                                                                                 "max":  0
+                                                                             },
+                                                              "record_count":  750000,
+                                                              "error_count":  0,
+                                                              "append_batches":  0,
+                                                              "append_batch_records":  0,
+                                                              "instability_warning":  false
+                                                          }
+                                          }
+                                      ]
+                    }
+                ]
+}

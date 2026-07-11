@@ -10,6 +10,11 @@ $ErrorActionPreference = "Stop"
 
 $Profiles = @("single-threaded", "worker-event-loops", "batched-writes")
 $Workloads = @("produce-throughput", "produce-latency", "fetch-throughput")
+$ExpectedProfiles = @{
+  "single-threaded" = @{ Io = 1; Append = 0; Batch = 1 }
+  "worker-event-loops" = @{ Io = 2; Append = 2; Batch = 1 }
+  "batched-writes" = @{ Io = 2; Append = 2; Batch = 32 }
+}
 $Files = @(Get-ChildItem -Path $InputDir -Filter *.json -File | Sort-Object Name)
 if ($Files.Count -ne 9) { throw "Windows publication requires exactly nine benchmark JSON files." }
 
@@ -27,6 +32,41 @@ foreach ($File in $Files) {
   if ($Document.environment.protocol_version -ne "4" -or
       $Document.environment.storage_format_version -ne "2") {
     throw "$($File.Name) does not use protocol v4 and storage format v2."
+  }
+  if (-not $ExpectedProfiles.ContainsKey($Document.broker.profile)) {
+    throw "$($File.Name) has an unknown Windows benchmark profile."
+  }
+  $Expected = $ExpectedProfiles[$Document.broker.profile]
+  if ($Document.broker.io_workers -ne $Expected.Io -or
+      $Document.broker.append_workers -ne $Expected.Append -or
+      $Document.broker.append_batch_records -ne $Expected.Batch -or
+      $Document.broker.append_queue_depth -ne 1024 -or
+      $Document.broker.durability -ne "flush") {
+    throw "$($File.Name) does not match its checked-in broker profile."
+  }
+  if ($Document.workload.partitions -ne 4 -or $Document.workload.clients -ne 16 -or
+      $Document.workload.payload_bytes -ne 256 -or $Document.workload.key_bytes -ne 16 -or
+      @($Document.repetitions).Count -ne 3) {
+    throw "$($File.Name) does not match the Windows topology and repetition contract."
+  }
+  switch ($Document.workload.name) {
+    "produce-throughput" {
+      if ($Document.workload.duration_seconds -ne 3 -or $Document.workload.warmup_seconds -ne 2) {
+        throw "$($File.Name) does not match the Windows throughput timing contract."
+      }
+    }
+    "produce-latency" {
+      if ($Document.workload.messages -ne 2000 -or $Document.workload.warmup_messages -ne 200) {
+        throw "$($File.Name) does not match the Windows latency message contract."
+      }
+    }
+    "fetch-throughput" {
+      if ($Document.workload.messages -ne 5000 -or
+          $Document.workload.preload_method -ne "authenticated-protocol") {
+        throw "$($File.Name) does not match the Windows fetch contract."
+      }
+    }
+    default { throw "$($File.Name) has an unknown Windows workload." }
   }
   $Documents += $Document
 }
@@ -75,6 +115,8 @@ $Lines = @(
   "# Native Windows Release Benchmarks",
   "",
   "Secondary comparison for exact commit ``$($GitShas[0])`` on $($Environment.cpu_model), $($Environment.logical_cpus) logical CPUs, $($Environment.memory_bytes) bytes RAM, $($Environment.compiler). GCP ``e2-micro`` remains the headline environment.",
+  "",
+  "These correctness-sized secondary runs use four partitions, 16 clients, 256-byte values, 16-byte keys, and three repetitions. Produce throughput measures three seconds after a two-second warmup; latency uses 200 warmup plus 2,000 measured messages; fetch uses an authenticated protocol preload of 5,000 records. These parameters intentionally differ from the GCP headline workloads and are retained in the JSON.",
   "",
   "| Profile | Produce records/s | Produce CV | p50 (us) | p95 (us) | p99 (us) | Fetch records/s |",
   "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"

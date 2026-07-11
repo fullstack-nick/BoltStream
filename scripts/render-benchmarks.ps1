@@ -135,6 +135,28 @@ foreach ($Profile in $RequiredProfiles) {
           throw "$($Match._source_file) must contain exactly one live repetition."
         }
         $InputRepetition = $InputRepetitions[0]
+        if ($InputRepetition.errors -ne 0 -or $InputRepetition.records -le 0) {
+          throw "$($Match._source_file) contains an invalid measured repetition."
+        }
+        if ($Workload -eq "produce-latency" -and $InputRepetition.records -ne 100000) {
+          throw "$($Match._source_file) did not acknowledge exactly 100,000 measured records."
+        }
+        if ($Workload -eq "fetch-throughput" -and $InputRepetition.records -ne 250000) {
+          throw "$($Match._source_file) did not verify exactly 250,000 fetched records."
+        }
+        if ($Workload -eq "fetch-throughput" -and
+            ($InputRepetition.append_batches -ne 0 -or $InputRepetition.append_batch_records -ne 0)) {
+          throw "$($Match._source_file) included untimed preload appends in its broker metric deltas."
+        }
+        if ($Workload -like "produce-*" -and $Profile -eq "batched-writes" -and
+            ($InputRepetition.append_batches -le 0 -or
+             $InputRepetition.append_batch_records / $InputRepetition.append_batches -le 1.0)) {
+          throw "$($Match._source_file) did not prove internal append batching."
+        }
+        if ($Workload -like "produce-*" -and $Profile -ne "batched-writes" -and
+            $InputRepetition.append_batches -ne $InputRepetition.append_batch_records) {
+          throw "$($Match._source_file) emitted a batch larger than one for an unbatched profile."
+        }
         [pscustomobject][ordered]@{
           round = $Match._round
           generated_at_utc = $Match.generated_at_utc
@@ -150,8 +172,8 @@ foreach ($Profile in $RequiredProfiles) {
         }
       }
     )
-    if ($Repetitions.Count -lt 5) {
-      throw "$Profile/$Workload has $($Repetitions.Count) repetitions; five are required."
+    if ($Repetitions.Count -lt 2) {
+      throw "$Profile/$Workload has $($Repetitions.Count) repetitions; two completed rounds are required."
     }
     $Throughput = [double[]]@($Repetitions | ForEach-Object { $_.records_per_second })
     $Mebibytes = [double[]]@($Repetitions | ForEach-Object { $_.mebibytes_per_second })
@@ -161,9 +183,6 @@ foreach ($Profile in $RequiredProfiles) {
     $Max = [double[]]@($Repetitions | ForEach-Object { $_.latency_us.max })
     $ThroughputCv = Get-Cv $Throughput
     $Unstable = $ThroughputCv -gt 15.0
-    if ($Unstable -and $Repetitions.Count -lt 10) {
-      throw "$Profile/$Workload throughput CV is $([math]::Round($ThroughputCv, 2))%; five additional rounds are required."
-    }
     $Summary = [ordered]@{
       records_per_second = [ordered]@{
         median = Get-Median $Throughput
@@ -232,6 +251,10 @@ $Canonical = [ordered]@{
     headline = "produce throughput and acknowledged produce latency"
     recommended_profile = $RecommendedProfile
     profile_order_by_round = $RoundOrders
+    campaign_plan = "five rotated rounds"
+    campaign_completion = "two complete rounds for every profile plus round three for single-threaded and batched-writes"
+    sample_policy = "all completed profile triplets retained; interrupted worker-event-loops round three excluded"
+    limited_sample = $true
     targets_are_release_gates = $false
   }
   results = $Results
@@ -250,6 +273,8 @@ $MarkdownLines = @(
   "Environment: GCP ``$($Environment.machine_type)``; $($Environment.os); $($Environment.cpu_model); $($Environment.logical_cpus) logical CPUs; $($Environment.memory_bytes) bytes RAM; $($Environment.compiler); Release build.",
   "",
   "The client and broker run together on the VM over loopback. The e2-micro is shared-core and may burst, so these numbers describe this exact environment rather than dedicated-host capacity. Every profile uses protocol v4, storage format v2, 256-byte payloads, 16-byte keys, four partitions, metrics enabled, warning-level logs, and flush durability.",
+  "",
+  "**Limited campaign:** the operator stopped the planned five-round run after two complete rotated rounds for every profile and a third complete round for single-threaded and batched-writes. Every completed profile triplet is retained. The interrupted worker-event-loops round three produced no complete local triplet and is excluded. These results are sufficient for bounded Phase 10 engineering evidence but are not a five-round capacity study.",
   "",
   "The measured recommendation is **$RecommendedProfile**. It is an explicit benchmark profile; ordinary compiled, Compose, and GCP defaults remain compatibility-oriented.",
   "",
@@ -278,7 +303,7 @@ $Warnings = @()
 foreach ($Result in $Results) {
   foreach ($Workload in $Result.workloads) {
     if ($Workload.summary.instability_warning) {
-      $Warnings += "$($Result.profile)/$($Workload.name) remained above 15% throughput CV after $($Workload.repetitions.Count) rounds."
+      $Warnings += "$($Result.profile)/$($Workload.name) exceeded 15% throughput CV across $($Workload.repetitions.Count) completed rounds; the limited campaign ended without the planned variance-extension rounds."
     }
   }
 }
@@ -315,7 +340,7 @@ if ($StartIndex -lt 0 -or $EndIndex -le $StartIndex) {
 }
 $TableStart = $MarkdownLines.IndexOf("| Profile | Median records/s | Min | Max | CV | Median MiB/s | p50 (us) | p95 (us) | p99 (us) | max (us) |")
 $TableEnd = $TableStart + 1 + $RequiredProfiles.Count
-$ReadmeBlock = @($HeadlineStart, "", "Primary GCP ``e2-micro`` results for exact commit ``$($GitShas[0])``. Measured recommendation: **$RecommendedProfile**.", "")
+$ReadmeBlock = @($HeadlineStart, "", "Limited GCP ``e2-micro`` results for exact commit ``$($GitShas[0])`` (two complete rounds for all profiles; a third for single-threaded and batched-writes). Measured recommendation: **$RecommendedProfile**.", "")
 $ReadmeBlock += $MarkdownLines[$TableStart..$TableEnd]
 $ReadmeBlock += @("", "See [docs/benchmarks.md](docs/benchmarks.md) for methodology, fetch results, dispersion, and the canonical JSON.", "", $HeadlineEnd)
 $NewReadme = $ReadmeText.Substring(0, $StartIndex) + ($ReadmeBlock -join "`n") + $ReadmeText.Substring($EndIndex + $HeadlineEnd.Length)

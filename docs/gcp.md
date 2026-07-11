@@ -26,6 +26,11 @@ service to be active, ready, and still report the deployed SHA. Publish only aft
 `terraform plan -detailed-exitcode` returns zero and the full authenticated live
 regression passes.
 
+If the operator process is interrupted, repeat the same command with `-Resume`.
+Resume keeps only complete three-workload profile results whose JSON is zero-error
+and matches the requested SHA/profile/workload. A partial profile is rerun, while
+completed samples are never overwritten.
+
 For fetch throughput, the 250,000-record preload is untimed setup. The runner creates
 the disposable topic through the authenticated broker, stops only the isolated
 benchmark service, uses `boltstream-bench prepare-fetch` to append deterministic

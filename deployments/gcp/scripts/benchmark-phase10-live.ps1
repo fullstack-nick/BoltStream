@@ -6,6 +6,7 @@ param(
   [string]$OutputDir = "artifacts/benchmarks/gcp",
   [int]$StartRound = 1,
   [int]$Rounds = 5,
+  [switch]$Resume,
   [switch]$Quick
 )
 
@@ -67,6 +68,29 @@ try {
     }
     foreach ($ProfileName in $RoundOrder) {
       $Metadata = $Profiles[$ProfileName]
+      $LocalResults = @("produce-throughput", "produce-latency", "fetch-throughput") |
+        ForEach-Object { Join-Path $OutputDir "$ProfileName-$_-r$Round.json" }
+      if ($Resume) {
+        $ExistingResults = @($LocalResults | Where-Object { Test-Path $_ })
+        if ($ExistingResults.Count -eq $LocalResults.Count) {
+          foreach ($LocalResult in $LocalResults) {
+            $Result = Get-Content $LocalResult -Raw | ConvertFrom-Json
+            $BaseName = [IO.Path]::GetFileNameWithoutExtension($LocalResult)
+            $ExpectedWorkload = $BaseName.Replace("$ProfileName-", "").Replace("-r$Round", "")
+            if ($Result.environment.git_sha -ne $GitSha -or
+                $Result.broker.profile -ne $ProfileName -or
+                $Result.workload.name -ne $ExpectedWorkload -or
+                $Result.summary.errors -ne 0) {
+              throw "Cannot resume from invalid result $LocalResult."
+            }
+          }
+          Write-Host "GCP Phase 10 resume kept round ${Round}: $ProfileName"
+          continue
+        }
+        if ($ExistingResults.Count -gt 0) {
+          Remove-Item -Force -LiteralPath $ExistingResults
+        }
+      }
       $RemoteScript = "/tmp/phase10-$ProfileName-r$Round.sh"
       $LocalScript = Join-Path $env:TEMP "phase10-$ProfileName-r$Round.sh"
       $RemotePrefix = "/tmp/phase10-$ProfileName-r$Round"

@@ -1,0 +1,11 @@
+{
+  "schema_version":1,
+  "generated_at_utc":"2026-07-11T11:34:13Z",
+  "environment":{"kind":"gcp-e2-micro","machine_type":"e2-micro","cpu_model":"AMD EPYC 7B12","logical_cpus":2,"memory_bytes":1001922560,"os":"Linux 6.17.0-1020-gcp","compiler":"GNU 13.3.0","build_type":"Release","git_sha":"14d225abe1d5","protocol_version":"4","storage_format_version":"2"},
+  "broker":{"profile":"single-threaded","io_workers":1,"append_workers":0,"append_batch_records":1,"append_queue_depth":1024,"durability":"flush","metrics_enabled":true,"log_level":"warn"},
+  "workload":{"name":"produce-throughput","partitions":4,"clients":16,"duration_seconds":30,"warmup_seconds":60,"messages":100000,"warmup_messages":10000,"payload_bytes":256,"key_bytes":16,"timeout_ms":30000,"preload_method":"authenticated-protocol","preload_batch_records":1024},
+  "repetitions":[
+    {"index":1,"records":3750,"bytes":1170000,"seconds":30.010,"records_per_second":124.958,"mebibytes_per_second":0.037,"errors":0,"latency_us":{"p50":0.000,"p95":0.000,"p99":0.000,"max":0.000},"append_batches":35956,"append_batch_records":35956}
+  ],
+  "summary":{"records_per_second":{"median":124.958,"min":124.958,"max":124.958,"cv_percent":0.000},"latency_us":{"p50":0.000,"p95":0.000,"p99":0.000,"max":0.000},"errors":0}
+}

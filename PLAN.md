@@ -1175,10 +1175,14 @@ live GCP proof path.
   labels this `direct-batched-storage-setup`; setup time is excluded, but every fetched
   key, value, partition, offset, and total count is verified. Normal `run
   --workload fetch-throughput` retains its authenticated protocol preload.
-- Run five rounds with profile order rotated by round. Publish medians, min/max, and
-  coefficient of variation. If produce-throughput CV exceeds 15%, run five more
-  rounds and retain all samples; persistent shared-core instability is labeled, never
-  hidden by selecting one favorable sample.
+- The initial campaign plan is five rounds with profile order rotated by round. The
+  Phase 10 campaign was stopped by operator decision after two complete rounds for
+  every profile plus a third complete round for single-threaded and batched-writes;
+  the next worker-event-loops triplet was interrupted before local publication. The
+  report retains every completed triplet, publishes medians, min/max, and coefficient
+  of variation, and carries an explicit limited-sample/instability warning instead of
+  spending another day on the shared-core VM. Future capacity studies may use
+  `-Resume`; partial profiles are rerun and completed samples are never overwritten.
 
 #### Verification and Live Proof
 
@@ -1208,7 +1212,10 @@ live GCP proof path.
   the batched profile proves an average append batch above one while unbatched
   profiles remain exactly one.
 - Produced/fetched counts match, every measured request succeeds, reports regenerate
-  exactly, no sample is cherry-picked, and earlier phase behavior remains green.
+  exactly, and no completed sample is cherry-picked. The operator-approved limited
+  GCP campaign is sufficient for Phase 10 engineering evidence but is not represented
+  as the originally planned five-round capacity study. Earlier phase behavior remains
+  green.
 - The normal GCP service is restored and healthy with no temporary override/data and
   no Terraform drift. Missing aspirational performance goals are documented as
   measured bottlenecks and do not block completion.

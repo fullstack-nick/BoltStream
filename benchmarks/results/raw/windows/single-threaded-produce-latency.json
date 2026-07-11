@@ -1,0 +1,13 @@
+{
+  "schema_version":1,
+  "generated_at_utc":"2026-07-11T09:16:44Z",
+  "environment":{"kind":"native-windows","machine_type":"developer-laptop","cpu_model":"Intel64 Family 6 Model 186 Stepping 2, GenuineIntel","logical_cpus":20,"memory_bytes":33960161280,"os":"Windows","compiler":"MSVC 19.44.35228.0","build_type":"Release","git_sha":"14d225abe1d5","protocol_version":"4","storage_format_version":"2"},
+  "broker":{"profile":"single-threaded","io_workers":1,"append_workers":0,"append_batch_records":1,"append_queue_depth":1024,"durability":"flush","metrics_enabled":true,"log_level":"warn"},
+  "workload":{"name":"produce-latency","partitions":4,"clients":16,"duration_seconds":3,"warmup_seconds":2,"messages":2000,"warmup_messages":200,"payload_bytes":256,"key_bytes":16,"timeout_ms":30000,"preload_method":"authenticated-protocol","preload_batch_records":1024},
+  "repetitions":[
+    {"index":1,"records":2000,"bytes":624000,"seconds":11.671,"records_per_second":171.368,"mebibytes_per_second":0.051,"errors":0,"latency_us":{"p50":109957.900,"p95":154265.100,"p99":170549.100,"max":188156.500},"append_batches":2200,"append_batch_records":2200},
+    {"index":2,"records":2000,"bytes":624000,"seconds":3.526,"records_per_second":567.268,"mebibytes_per_second":0.169,"errors":0,"latency_us":{"p50":27837.400,"p95":41409.900,"p99":53383.900,"max":58576.700},"append_batches":2200,"append_batch_records":2200},
+    {"index":3,"records":2000,"bytes":624000,"seconds":3.592,"records_per_second":556.817,"mebibytes_per_second":0.166,"errors":0,"latency_us":{"p50":25470.700,"p95":49582.200,"p99":71280.600,"max":97342.200},"append_batches":2200,"append_batch_records":2200}
+  ],
+  "summary":{"records_per_second":{"median":556.817,"min":171.368,"max":567.268,"cv_percent":52.248},"latency_us":{"p50":32161.300,"p95":139029.700,"p99":161401.600,"max":188156.500},"errors":0}
+}

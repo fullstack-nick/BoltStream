@@ -59,6 +59,10 @@ jobs:
         if: matrix.build_type == 'Debug'
         run: pwsh ./scripts/smoke-phase10.ps1 -Preset linux-gcc-debug -SkipBuild
 
+      - name: Verify Phase 10 benchmark publication
+        if: matrix.build_type == 'Debug'
+        run: pwsh ./scripts/render-benchmarks.ps1 -InputDir benchmarks/results/raw/gcp -Check
+
       - name: Validate Phase 9 operations assets
         if: matrix.build_type == 'Debug'
         run: |
@@ -113,6 +117,10 @@ jobs:
       - name: Phase 10 benchmark smoke
         shell: pwsh
         run: ./scripts/smoke-phase10.ps1 -Preset windows-msvc-debug -SkipBuild
+
+      - name: Verify Phase 10 Windows benchmark publication
+        shell: pwsh
+        run: ./scripts/render-windows-benchmarks.ps1 -InputDir benchmarks/results/raw/windows -Check
 
   thread-sanitizer:
     name: Linux ThreadSanitizer

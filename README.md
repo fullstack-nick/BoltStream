@@ -45,8 +45,15 @@ dashboard on top of the Phase 8 retention and lifecycle runtime.
 
 <!-- PHASE10_BENCHMARK_START -->
 
-Canonical GCP results are generated only from an exact pushed Release artifact
-after the complete rotated benchmark matrix succeeds.
+Limited GCP `e2-micro` results for exact commit `14d225abe1d5` (two complete rounds for all profiles; a third for single-threaded and batched-writes). Measured recommendation: **batched-writes**.
+
+| Profile | Median records/s | Min | Max | CV | Median MiB/s | p50 (us) | p95 (us) | p99 (us) | max (us) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| single-threaded | 104 | 71 | 125 | 27.13% | 0.031 | 258644.424 | 741374.534 | 753321.145 | 1992654.75 |
+| worker-event-loops | 92 | 67 | 117 | 38.39% | 0.028 | 391006.978 | 746455.544 | 756699.618 | 1492236.219 |
+| batched-writes | 180 | 171 | 191 | 5.46% | 0.054 | 12962.789 | 239372.586 | 243553.735 | 970660.144 |
+
+See [docs/benchmarks.md](docs/benchmarks.md) for methodology, fetch results, dispersion, and the canonical JSON.
 
 <!-- PHASE10_BENCHMARK_END -->
 
