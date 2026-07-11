@@ -14,8 +14,8 @@ The measured recommendation is **batched-writes**. It is an explicit benchmark p
 
 | Profile | Median records/s | Min | Max | CV | Median MiB/s | p50 (us) | p95 (us) | p99 (us) | max (us) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| single-threaded | 104 | 71 | 125 | 27.13% | 0.031 | 258644.424 | 741374.534 | 753321.145 | 1992654.75 |
-| worker-event-loops | 92 | 67 | 117 | 38.39% | 0.028 | 391006.978 | 746455.544 | 756699.618 | 1492236.219 |
+| single-threaded | 104 | 71 | 125 | 27.13% | 0.031 | 258644.424 | 741374.534 | 753321.145 | 1992654.750 |
+| worker-event-loops | 92 | 67 | 117 | 38.39% | 0.028 | 391006.978 | 746455.544 | 756699.619 | 1492236.219 |
 | batched-writes | 180 | 171 | 191 | 5.46% | 0.054 | 12962.789 | 239372.586 | 243553.735 | 970660.144 |
 
 ## Fetch Results
@@ -23,13 +23,13 @@ The measured recommendation is **batched-writes**. It is an explicit benchmark p
 | Profile | Median records/s | Min | Max | CV | Median MiB/s |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | single-threaded | 10527 | 10522 | 11001 | 2.58% | 3.132 |
-| worker-event-loops | 10756 | 10518 | 10994 | 3.13% | 3.2 |
+| worker-event-loops | 10756 | 10518 | 10994 | 3.13% | 3.201 |
 | batched-writes | 10628 | 10007 | 11097 | 5.17% | 3.162 |
 
 ## Instability Warning
 
-- single-threaded/produce-throughput exceeded 15% throughput CV across 3 completed rounds; the limited campaign ended without the planned variance-extension rounds.
-- worker-event-loops/produce-throughput exceeded 15% throughput CV across 2 completed rounds; the limited campaign ended without the planned variance-extension rounds.
+- single-threaded/produce-throughput exceeded 15% throughput CV (27.13%) across 3 completed rounds; the limited campaign ended without the planned variance-extension rounds.
+- worker-event-loops/produce-throughput exceeded 15% throughput CV (38.39%) across 2 completed rounds; the limited campaign ended without the planned variance-extension rounds.
 
 ## Every Measured Round
 

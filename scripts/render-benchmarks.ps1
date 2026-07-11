@@ -39,6 +39,56 @@ function Get-Cv([double[]]$Values) {
   return [math]::Sqrt($Squares / ($Values.Count - 1)) / $Mean * 100.0
 }
 
+function Format-Number([double]$Value, [int]$Decimals) {
+  $Format = if ($Decimals -eq 0) { "0" } else { "0." + [string]::new('0', $Decimals) }
+  return $Value.ToString($Format, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Test-IsJsonNumber($Value) {
+  return $Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or
+    $Value -is [uint16] -or $Value -is [int32] -or $Value -is [uint32] -or
+    $Value -is [int64] -or $Value -is [uint64] -or $Value -is [single] -or
+    $Value -is [double] -or $Value -is [decimal]
+}
+
+function Test-JsonValueEquivalent($Left, $Right) {
+  if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+  if ((Test-IsJsonNumber $Left) -and (Test-IsJsonNumber $Right)) {
+    return [double]$Left -eq [double]$Right
+  }
+  if ($Left -is [pscustomobject] -and $Right -is [pscustomobject]) {
+    $LeftNames = @($Left.PSObject.Properties.Name)
+    $RightNames = @($Right.PSObject.Properties.Name)
+    if (($LeftNames -join "`n") -cne ($RightNames -join "`n")) { return $false }
+    foreach ($Name in $LeftNames) {
+      if (-not (Test-JsonValueEquivalent $Left.$Name $Right.$Name)) { return $false }
+    }
+    return $true
+  }
+  if ($Left -is [Collections.IEnumerable] -and $Left -isnot [string] -and
+      $Right -is [Collections.IEnumerable] -and $Right -isnot [string]) {
+    $LeftItems = @($Left)
+    $RightItems = @($Right)
+    if ($LeftItems.Count -ne $RightItems.Count) { return $false }
+    for ($Index = 0; $Index -lt $LeftItems.Count; ++$Index) {
+      if (-not (Test-JsonValueEquivalent $LeftItems[$Index] $RightItems[$Index])) { return $false }
+    }
+    return $true
+  }
+  return $Left -ceq $Right
+}
+
+function Test-JsonEquivalent([string]$Path, [string]$GeneratedJson) {
+  if (-not (Test-Path $Path)) { return $false }
+  try {
+    $Existing = Get-Content $Path -Raw | ConvertFrom-Json
+    $Generated = $GeneratedJson | ConvertFrom-Json
+    return Test-JsonValueEquivalent $Existing $Generated
+  } catch {
+    return $false
+  }
+}
+
 $Documents = @()
 foreach ($File in $Files) {
   $RoundMatch = [regex]::Match($File.BaseName, '-r(?<round>[1-9][0-9]*)$')
@@ -259,7 +309,7 @@ $Canonical = [ordered]@{
   }
   results = $Results
 }
-$CanonicalText = (($Canonical | ConvertTo-Json -Depth 20).Replace("`r`n", "`n")) + "`n"
+$CanonicalText = ($Canonical | ConvertTo-Json -Depth 20 -Compress) + "`n"
 
 function Find-Workload($ProfileResult, [string]$Name) {
   return $ProfileResult.workloads | Where-Object { $_.name -eq $Name } | Select-Object -First 1
@@ -286,7 +336,7 @@ $MarkdownLines = @(
 foreach ($Result in $Results) {
   $Throughput = Find-Workload $Result "produce-throughput"
   $Latency = Find-Workload $Result "produce-latency"
-  $MarkdownLines += "| $($Result.profile) | $([math]::Round($Throughput.summary.records_per_second.median, 0)) | $([math]::Round($Throughput.summary.records_per_second.min, 0)) | $([math]::Round($Throughput.summary.records_per_second.max, 0)) | $([math]::Round($Throughput.summary.records_per_second.cv_percent, 2))% | $([math]::Round($Throughput.summary.mebibytes_per_second.median, 3)) | $([math]::Round($Latency.summary.latency_us.p50, 3)) | $([math]::Round($Latency.summary.latency_us.p95, 3)) | $([math]::Round($Latency.summary.latency_us.p99, 3)) | $([math]::Round($Latency.summary.latency_us.max, 3)) |"
+  $MarkdownLines += "| $($Result.profile) | $(Format-Number $Throughput.summary.records_per_second.median 0) | $(Format-Number $Throughput.summary.records_per_second.min 0) | $(Format-Number $Throughput.summary.records_per_second.max 0) | $(Format-Number $Throughput.summary.records_per_second.cv_percent 2)% | $(Format-Number $Throughput.summary.mebibytes_per_second.median 3) | $(Format-Number $Latency.summary.latency_us.p50 3) | $(Format-Number $Latency.summary.latency_us.p95 3) | $(Format-Number $Latency.summary.latency_us.p99 3) | $(Format-Number $Latency.summary.latency_us.max 3) |"
 }
 $MarkdownLines += @(
   "",
@@ -297,13 +347,13 @@ $MarkdownLines += @(
 )
 foreach ($Result in $Results) {
   $Fetch = Find-Workload $Result "fetch-throughput"
-  $MarkdownLines += "| $($Result.profile) | $([math]::Round($Fetch.summary.records_per_second.median, 0)) | $([math]::Round($Fetch.summary.records_per_second.min, 0)) | $([math]::Round($Fetch.summary.records_per_second.max, 0)) | $([math]::Round($Fetch.summary.records_per_second.cv_percent, 2))% | $([math]::Round($Fetch.summary.mebibytes_per_second.median, 3)) |"
+  $MarkdownLines += "| $($Result.profile) | $(Format-Number $Fetch.summary.records_per_second.median 0) | $(Format-Number $Fetch.summary.records_per_second.min 0) | $(Format-Number $Fetch.summary.records_per_second.max 0) | $(Format-Number $Fetch.summary.records_per_second.cv_percent 2)% | $(Format-Number $Fetch.summary.mebibytes_per_second.median 3) |"
 }
 $Warnings = @()
 foreach ($Result in $Results) {
   foreach ($Workload in $Result.workloads) {
     if ($Workload.summary.instability_warning) {
-      $Warnings += "$($Result.profile)/$($Workload.name) exceeded 15% throughput CV across $($Workload.repetitions.Count) completed rounds; the limited campaign ended without the planned variance-extension rounds."
+      $Warnings += "$($Result.profile)/$($Workload.name) exceeded 15% throughput CV ($(Format-Number $Workload.summary.records_per_second.cv_percent 2)%) across $($Workload.repetitions.Count) completed rounds; the limited campaign ended without the planned variance-extension rounds."
     }
   }
 }
@@ -317,7 +367,7 @@ $MarkdownLines += @("", "## Every Measured Round", "",
 foreach ($Result in $Results) {
   foreach ($Workload in $Result.workloads) {
     foreach ($Repetition in $Workload.repetitions) {
-      $MarkdownLines += "| $($Result.profile) | $($Workload.name) | $($Repetition.round) | $([math]::Round($Repetition.records_per_second, 3)) | $([math]::Round($Repetition.mebibytes_per_second, 3)) | $($Repetition.records) | $($Repetition.errors) | $($Repetition.append_batches) | $($Repetition.append_batch_records) |"
+      $MarkdownLines += "| $($Result.profile) | $($Workload.name) | $($Repetition.round) | $(Format-Number $Repetition.records_per_second 3) | $(Format-Number $Repetition.mebibytes_per_second 3) | $($Repetition.records) | $($Repetition.errors) | $($Repetition.append_batches) | $($Repetition.append_batch_records) |"
     }
   }
 }
@@ -346,7 +396,7 @@ $ReadmeBlock += @("", "See [docs/benchmarks.md](docs/benchmarks.md) for methodol
 $NewReadme = $ReadmeText.Substring(0, $StartIndex) + ($ReadmeBlock -join "`n") + $ReadmeText.Substring($EndIndex + $HeadlineEnd.Length)
 
 if ($Check) {
-  if (-not (Test-Path $CanonicalJson) -or (Get-Content $CanonicalJson -Raw) -ne $CanonicalText) {
+  if (-not (Test-JsonEquivalent $CanonicalJson $CanonicalText)) {
     throw "Canonical benchmark JSON is not regenerated exactly."
   }
   if (-not (Test-Path $Markdown) -or (Get-Content $Markdown -Raw) -ne $MarkdownText) {

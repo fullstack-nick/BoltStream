@@ -18,6 +18,56 @@ $ExpectedProfiles = @{
 $Files = @(Get-ChildItem -Path $InputDir -Filter *.json -File | Sort-Object Name)
 if ($Files.Count -ne 9) { throw "Windows publication requires exactly nine benchmark JSON files." }
 
+function Format-Number([double]$Value, [int]$Decimals) {
+  $Format = if ($Decimals -eq 0) { "0" } else { "0." + [string]::new('0', $Decimals) }
+  return $Value.ToString($Format, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Test-IsJsonNumber($Value) {
+  return $Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or
+    $Value -is [uint16] -or $Value -is [int32] -or $Value -is [uint32] -or
+    $Value -is [int64] -or $Value -is [uint64] -or $Value -is [single] -or
+    $Value -is [double] -or $Value -is [decimal]
+}
+
+function Test-JsonValueEquivalent($Left, $Right) {
+  if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+  if ((Test-IsJsonNumber $Left) -and (Test-IsJsonNumber $Right)) {
+    return [double]$Left -eq [double]$Right
+  }
+  if ($Left -is [pscustomobject] -and $Right -is [pscustomobject]) {
+    $LeftNames = @($Left.PSObject.Properties.Name)
+    $RightNames = @($Right.PSObject.Properties.Name)
+    if (($LeftNames -join "`n") -cne ($RightNames -join "`n")) { return $false }
+    foreach ($Name in $LeftNames) {
+      if (-not (Test-JsonValueEquivalent $Left.$Name $Right.$Name)) { return $false }
+    }
+    return $true
+  }
+  if ($Left -is [Collections.IEnumerable] -and $Left -isnot [string] -and
+      $Right -is [Collections.IEnumerable] -and $Right -isnot [string]) {
+    $LeftItems = @($Left)
+    $RightItems = @($Right)
+    if ($LeftItems.Count -ne $RightItems.Count) { return $false }
+    for ($Index = 0; $Index -lt $LeftItems.Count; ++$Index) {
+      if (-not (Test-JsonValueEquivalent $LeftItems[$Index] $RightItems[$Index])) { return $false }
+    }
+    return $true
+  }
+  return $Left -ceq $Right
+}
+
+function Test-JsonEquivalent([string]$Path, [string]$GeneratedJson) {
+  if (-not (Test-Path $Path)) { return $false }
+  try {
+    $Existing = Get-Content $Path -Raw | ConvertFrom-Json
+    $Generated = $GeneratedJson | ConvertFrom-Json
+    return Test-JsonValueEquivalent $Existing $Generated
+  } catch {
+    return $false
+  }
+}
+
 $Documents = @()
 foreach ($File in $Files) {
   $Raw = Get-Content $File.FullName -Raw
@@ -109,7 +159,7 @@ $Consolidated = [ordered]@{
   }
   results = $Results
 }
-$JsonText = (($Consolidated | ConvertTo-Json -Depth 20).Replace("`r`n", "`n")) + "`n"
+$JsonText = ($Consolidated | ConvertTo-Json -Depth 20 -Compress) + "`n"
 
 $Lines = @(
   "# Native Windows Release Benchmarks",
@@ -125,13 +175,13 @@ foreach ($Profile in $Profiles) {
   $Throughput = $Results | Where-Object { $_.profile -eq $Profile -and $_.workload -eq "produce-throughput" }
   $Latency = $Results | Where-Object { $_.profile -eq $Profile -and $_.workload -eq "produce-latency" }
   $Fetch = $Results | Where-Object { $_.profile -eq $Profile -and $_.workload -eq "fetch-throughput" }
-  $Lines += "| $Profile | $([math]::Round($Throughput.summary.records_per_second.median, 0)) | $([math]::Round($Throughput.summary.records_per_second.cv_percent, 2))% | $([math]::Round($Latency.summary.latency_us.p50, 3)) | $([math]::Round($Latency.summary.latency_us.p95, 3)) | $([math]::Round($Latency.summary.latency_us.p99, 3)) | $([math]::Round($Fetch.summary.records_per_second.median, 0)) |"
+  $Lines += "| $Profile | $(Format-Number $Throughput.summary.records_per_second.median 0) | $(Format-Number $Throughput.summary.records_per_second.cv_percent 2)% | $(Format-Number $Latency.summary.latency_us.p50 3) | $(Format-Number $Latency.summary.latency_us.p95 3) | $(Format-Number $Latency.summary.latency_us.p99 3) | $(Format-Number $Fetch.summary.records_per_second.median 0) |"
 }
 $Lines += @("", "Every repetition and its exact workload configuration is retained in [the Windows JSON](../benchmarks/results/phase-10-windows-release.json).", "")
 $MarkdownText = $Lines -join "`n"
 
 if ($Check) {
-  if (-not (Test-Path $OutputJson) -or (Get-Content $OutputJson -Raw) -ne $JsonText) {
+  if (-not (Test-JsonEquivalent $OutputJson $JsonText)) {
     throw "Windows benchmark JSON is not regenerated exactly."
   }
   if (-not (Test-Path $OutputMarkdown) -or (Get-Content $OutputMarkdown -Raw) -ne $MarkdownText) {
