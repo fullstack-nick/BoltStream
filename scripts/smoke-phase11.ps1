@@ -21,6 +21,9 @@ $Server = Join-Path $BuildDir "boltstream-server.exe"
 if (-not (Test-Path $Server)) { $Server = Join-Path $BuildDir "boltstream-server" }
 $Stdout = Join-Path $DataDir "server.out"
 $Stderr = Join-Path $DataDir "server.err"
+$CurlCommand = Get-Command curl.exe -ErrorAction SilentlyContinue
+if (-not $CurlCommand) { $CurlCommand = Get-Command curl -ErrorAction Stop }
+$Curl = $CurlCommand.Source
 $StartArguments = @{
   FilePath = $Server
   ArgumentList = @(
@@ -39,7 +42,7 @@ $Process = Start-Process @StartArguments
 try {
   $Ready = $false
   for ($Attempt = 0; $Attempt -lt 80; $Attempt++) {
-    $Health = & curl.exe -fsS "http://127.0.0.1:$AdminPort/health/ready" 2>$null
+    $Health = & $Curl -fsS "http://127.0.0.1:$AdminPort/health/ready" 2>$null
     if ($LASTEXITCODE -eq 0) { $Ready = $true; break }
     Start-Sleep -Milliseconds 100
   }
@@ -77,7 +80,7 @@ try {
     --partition 0 --from beginning --compression zstd | ConvertFrom-Json
   $ZstdFetchTimer.Stop()
   if ($Fetched.count -ne 32 -or $Fetched.next_offset -ne 32) { throw "Compressed fetch mismatch." }
-  $Metrics = (& curl.exe -fsS "http://127.0.0.1:$AdminPort/metrics") -join "`n"
+  $Metrics = (& $Curl -fsS "http://127.0.0.1:$AdminPort/metrics") -join "`n"
   foreach ($Required in @(
       'boltstream_compression_batches_total{codec="zstd"} 1',
       'boltstream_compressed_fetch_passthrough_total 1')) {
