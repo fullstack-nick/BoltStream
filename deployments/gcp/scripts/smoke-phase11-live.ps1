@@ -73,6 +73,8 @@ grep -F 'boltstream_compressed_fetch_passthrough_total 1' <<<"$metrics" >/dev/nu
 none_bytes="$(stat -c %s "$ROOT/topics/phase11-none/partition-000000/00000000000000000000.log")"
 zstd_bytes="$(stat -c %s "$ROOT/topics/phase11-zstd/partition-000000/00000000000000000000.log")"
 (( zstd_bytes < none_bytes )) || { echo "zstd log was not smaller" >&2; exit 1; }
+stored_log="$(grep -F '"event":"compression_batch_stored"' /tmp/boltstream-phase11.err | tail -1)"
+forwarded_log="$(grep -F '"event":"compressed_fetch_passthrough"' /tmp/boltstream-phase11.err | tail -1)"
 sudo kill "$PID"
 wait "$PID" 2>/dev/null || true
 PID=""
@@ -89,6 +91,8 @@ echo "zstd_log_bytes=$zstd_bytes"
 echo "inspect=$inspect"
 echo "recover=$recover"
 echo "passthrough_metric=1"
+echo "stored_log=$stored_log"
+echo "forwarded_log=$forwarded_log"
 '@
 $Script = $Script.Replace("__SHA__", $ExpectedGitSha)
 [System.IO.File]::WriteAllText($LocalScript, $Script.Replace("`r`n", "`n"),
