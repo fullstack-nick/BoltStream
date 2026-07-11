@@ -21,10 +21,20 @@ $Server = Join-Path $BuildDir "boltstream-server.exe"
 if (-not (Test-Path $Server)) { $Server = Join-Path $BuildDir "boltstream-server" }
 $Stdout = Join-Path $DataDir "server.out"
 $Stderr = Join-Path $DataDir "server.err"
-$Process = Start-Process -FilePath $Server -ArgumentList @(
+$StartArguments = @{
+  FilePath = $Server
+  ArgumentList = @(
   "--listen", "127.0.0.1:$BrokerPort", "--admin-listen", "127.0.0.1:$AdminPort",
   "--data", $DataDir, "--max-fetch-records", "1024"
-) -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -WindowStyle Hidden -PassThru
+  )
+  RedirectStandardOutput = $Stdout
+  RedirectStandardError = $Stderr
+  PassThru = $true
+}
+if ($IsWindows -or $PSVersionTable.PSEdition -eq "Desktop") {
+  $StartArguments.WindowStyle = "Hidden"
+}
+$Process = Start-Process @StartArguments
 
 try {
   $Ready = $false

@@ -109,7 +109,7 @@ try {
 
   $metrics = (& curl.exe -fsS "http://127.0.0.1:$AdminPort/metrics") -join "`n"
   if ($LASTEXITCODE -ne 0) { throw "Metrics scrape failed." }
-  Require-Metric $metrics 'boltstream_build_info\{[^\r\n]*protocol_version="4"' "build info"
+  Require-Metric $metrics 'boltstream_build_info\{[^\r\n]*protocol_version="5"' "build info"
   Require-Metric $metrics 'boltstream_ready 1' "readiness"
   Require-Metric $metrics 'boltstream_requests_total\{operation="produce"\} 5' "produce requests"
   Require-Metric $metrics 'boltstream_records_produced_total 5' "produced records"
