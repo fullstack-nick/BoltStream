@@ -170,7 +170,7 @@ sudo mkdir -p /etc/systemd/system/boltstream.service.d
 sudo tee /etc/systemd/system/boltstream.service.d/phase9-smoke.conf >/dev/null <<'EOF'
 [Service]
 ExecStart=
-ExecStart=/opt/boltstream/current/bin/boltstream-server --config /etc/boltstream/boltstream.yaml --segment-bytes 96 --segment-max-age-seconds 0 --retention-max-age-seconds 1 --retention-max-bytes 0 --retention-check-interval-ms 0
+ExecStart=/opt/boltstream/current/bin/boltstream-server --config /etc/boltstream/boltstream.yaml --segment-bytes 96 --segment-max-age-seconds 0 --retention-max-age-seconds 3600 --retention-max-bytes 0 --retention-check-interval-ms 0
 EOF
 sudo systemctl daemon-reload
 sudo systemctl restart boltstream.service
@@ -189,7 +189,7 @@ set -euo pipefail
 PART_DIR="/var/lib/boltstream/topics/$RetentionTopic/partition-000000"
 mapfile -t logs < <(find "`$PART_DIR" -maxdepth 1 -name '*.log' | sort)
 test "`${#logs[@]}" -ge 3
-for ((i=0; i<`${#logs[@]}-1; ++i)); do sudo touch -d '10 seconds ago' "`${logs[`$i]}"; done
+for ((i=0; i<`${#logs[@]}-1; ++i)); do sudo touch -d '2 hours ago' "`${logs[`$i]}"; done
 "@
   Invoke-RemoteScript $AgeScript "boltstream-phase9-age" | Out-Null
   $retained = Invoke-JsonTool $Admin @("retention", "run", "--host", $ExternalIp, "--port", "9000", "--topic", $RetentionTopic)

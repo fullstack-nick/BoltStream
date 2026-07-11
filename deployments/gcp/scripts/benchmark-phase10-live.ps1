@@ -153,8 +153,8 @@ run_fetch_bench() {
   sudo -u boltstream bash -c "set -a; source /etc/boltstream/boltstream.env; exec /opt/boltstream/current/bin/boltstream-admin topics create \\
     --topic '`$topic' --partitions 4 --host 127.0.0.1 --port 9000" >/dev/null
   sudo systemctl stop boltstream.service
-  sudo -u boltstream /opt/boltstream/current/bin/boltstream-bench prepare-fetch \\
-    --data-dir "`$DATA" --topic "`$topic" --partitions 4 --messages '$FetchMessages' \\
+  sudo -u boltstream /opt/boltstream/current/bin/boltstream-bench prepare-fetch \
+    --data-dir "`$DATA" --topic "`$topic" --partitions 4 --messages '$FetchMessages' \
     --payload-bytes 256 --key-bytes 16 --preload-batch-records 1024 >/dev/null
   sudo systemctl start boltstream.service
   wait_ready
