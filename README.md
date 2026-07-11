@@ -73,6 +73,8 @@ payload, zstd level 3) produced the following storage result:
 
 This single sample validates the comparison and pass-through path; it is not a capacity
 or statistical performance claim. See [the Phase 11 compression smoke](docs/compression-benchmarks.md).
+Exact-SHA CI, artifact, isolated GCP, recovery, cleanup, and Terraform evidence is
+recorded in [the Phase 11 proof](proof/phase-11.md).
 
 ## Native Windows Build
 
