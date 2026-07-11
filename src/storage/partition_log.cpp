@@ -20,6 +20,8 @@ namespace boltstream::storage {
 namespace {
 
 constexpr std::uint16_t kRecordFlags = 0;
+constexpr std::uint16_t kBatchVersion = 2;
+constexpr std::uint32_t kFixedBatchBodyBytes = 36;
 constexpr std::uint32_t kHeaderCount = 0;
 constexpr std::uint32_t kFixedRecordBodyBytes = 32;
 constexpr std::uint32_t kMinimumRecordBytes = kFixedRecordBodyBytes + sizeof(std::uint32_t);
@@ -33,6 +35,12 @@ struct SegmentInfo {
 struct DecodedRecord {
   Record record;
   std::uint32_t record_bytes{0};
+};
+
+struct DecodedBatch {
+  BatchMetadata metadata;
+  std::vector<protocol::BatchRecord> records;
+  std::uint32_t batch_bytes{0};
 };
 
 void write_u16(std::vector<std::uint8_t>& out, std::uint16_t value) {
@@ -241,6 +249,75 @@ std::vector<std::uint8_t> encode_record(std::uint64_t offset, std::uint64_t time
   return encoded;
 }
 
+std::vector<std::uint8_t> encode_batch(std::uint64_t base_offset, std::uint64_t timestamp_unix_ns,
+                                       compression::Codec codec, std::uint32_t record_count,
+                                       std::uint32_t uncompressed_bytes,
+                                       std::span<const std::uint8_t> encoded_records) {
+  std::vector<std::uint8_t> body;
+  body.reserve(kFixedBatchBodyBytes + encoded_records.size());
+  write_u16(body, kBatchVersion);
+  write_u16(body, 0);
+  write_u16(body, static_cast<std::uint16_t>(codec));
+  write_u16(body, 0);
+  write_u64(body, base_offset);
+  write_u64(body, timestamp_unix_ns);
+  write_u32(body, record_count);
+  write_u32(body, uncompressed_bytes);
+  write_u32(body, static_cast<std::uint32_t>(encoded_records.size()));
+  body.insert(body.end(), encoded_records.begin(), encoded_records.end());
+  std::vector<std::uint8_t> out;
+  write_u32(out, static_cast<std::uint32_t>(body.size() + sizeof(std::uint32_t)));
+  out.insert(out.end(), body.begin(), body.end());
+  write_u32(out, protocol::crc32(body));
+  return out;
+}
+
+DecodedBatch decode_batch(std::string_view topic, std::uint16_t partition,
+                          std::uint32_t batch_bytes, std::span<const std::uint8_t> body_and_crc,
+                          std::size_t maximum_uncompressed = protocol::kDefaultMaxFrameBytes) {
+  if (batch_bytes != body_and_crc.size() || batch_bytes < kFixedBatchBodyBytes + 4U) {
+    throw std::runtime_error("invalid batch length");
+  }
+  const auto body_bytes = batch_bytes - 4U;
+  if (protocol::crc32(body_and_crc.first(body_bytes)) != read_u32_be(body_and_crc, body_bytes)) {
+    throw std::runtime_error("batch crc mismatch");
+  }
+  if (read_u16_be(body_and_crc, 0) != kBatchVersion || read_u16_be(body_and_crc, 2) != 0 ||
+      read_u16_be(body_and_crc, 6) != 0) {
+    throw std::runtime_error("unsupported batch header");
+  }
+  const auto codec = static_cast<compression::Codec>(read_u16_be(body_and_crc, 4));
+  const auto base_offset = read_u64_be(body_and_crc, 8);
+  const auto timestamp = read_u64_be(body_and_crc, 16);
+  const auto count = read_u32_be(body_and_crc, 24);
+  const auto uncompressed = read_u32_be(body_and_crc, 28);
+  const auto encoded = read_u32_be(body_and_crc, 32);
+  if (!compression::is_supported(codec) || count == 0 || uncompressed == 0 ||
+      encoded != body_bytes - kFixedBatchBodyBytes) {
+    throw std::runtime_error("invalid batch header");
+  }
+  const auto raw =
+      compression::decompress(codec, body_and_crc.subspan(kFixedBatchBodyBytes, encoded),
+                              uncompressed, maximum_uncompressed);
+  DecodedBatch result;
+  const auto decoded = protocol::decode_record_set(raw, count, result.records);
+  if (!decoded.ok) {
+    throw std::runtime_error(decoded.message);
+  }
+  result.batch_bytes = batch_bytes;
+  result.metadata = {std::string{topic},
+                     partition,
+                     base_offset,
+                     base_offset + count,
+                     timestamp,
+                     count,
+                     uncompressed,
+                     encoded,
+                     batch_bytes + static_cast<std::uint32_t>(sizeof(std::uint32_t)),
+                     codec};
+  return result;
+}
+
 std::uintmax_t file_size_or_zero(const std::filesystem::path& path) {
   std::error_code ec;
   const auto size = std::filesystem::file_size(path, ec);
@@ -436,6 +513,95 @@ std::vector<RecordMetadata> PartitionLog::append_batch(std::span<const AppendRec
   return metadata;
 }
 
+BatchMetadata PartitionLog::append_encoded_batch(compression::Codec codec,
+                                                 std::span<const std::uint8_t> encoded_records,
+                                                 std::uint32_t uncompressed_bytes,
+                                                 std::span<const AppendRecord> decoded_records) {
+  if (decoded_records.empty() ||
+      decoded_records.size() > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::invalid_argument("encoded batch record count is invalid");
+  }
+  std::vector<protocol::BatchRecord> validation_records;
+  validation_records.reserve(decoded_records.size());
+  for (const auto& record : decoded_records) {
+    validation_records.push_back(
+        {{record.key.begin(), record.key.end()}, {record.value.begin(), record.value.end()}});
+  }
+  const auto canonical = protocol::encode_record_set(validation_records);
+  if (canonical.size() != uncompressed_bytes) {
+    throw std::invalid_argument("encoded batch logical size mismatch");
+  }
+  const auto decoded = compression::decompress(codec, encoded_records, uncompressed_bytes,
+                                               options_.max_uncompressed_batch_bytes);
+  if (decoded != canonical) {
+    throw std::invalid_argument("encoded batch content mismatch");
+  }
+
+  const auto base_offset = next_offset_;
+  const auto timestamp = unix_time_ns();
+  const auto encoded = encode_batch(base_offset, timestamp, codec,
+                                    static_cast<std::uint32_t>(decoded_records.size()),
+                                    uncompressed_bytes, encoded_records);
+  auto segment_base = active_segment_base();
+  auto log_path = segment_path(segment_base);
+  auto current_size = file_size_or_zero(log_path);
+  if (current_size > 0 && current_size + encoded.size() > options_.max_segment_bytes) {
+    segment_base = base_offset;
+    log_path = segment_path(segment_base);
+    current_size = 0;
+  }
+  const auto index_file_path = index_path(segment_base);
+  const auto original_log_size = current_size;
+  const auto original_index_size = file_size_or_zero(index_file_path);
+  try {
+    std::ofstream log_file{log_path, std::ios::binary | std::ios::app};
+    std::ofstream index_file{index_file_path, std::ios::binary | std::ios::app};
+    if (!log_file || !index_file) {
+      throw std::runtime_error("failed to open encoded batch segment");
+    }
+    log_file.write(reinterpret_cast<const char*>(encoded.data()),
+                   static_cast<std::streamsize>(encoded.size()));
+    const auto body_bytes = static_cast<std::uint32_t>(encoded.size() - 4U);
+    for (std::uint32_t index = 0; index < decoded_records.size(); ++index) {
+      write_index_entry(index_file, base_offset + index, current_size, body_bytes);
+    }
+    log_file.flush();
+    index_file.flush();
+    if (!log_file || !index_file) {
+      throw std::runtime_error("failed to flush encoded batch");
+    }
+    for (std::uint32_t index = 0; index < decoded_records.size(); ++index) {
+      index_.push_back({base_offset + index, current_size, body_bytes, log_path, index,
+                        static_cast<std::uint32_t>(decoded_records.size())});
+    }
+    next_offset_ += decoded_records.size();
+  } catch (...) {
+    std::error_code ignored;
+    if (original_log_size == 0) {
+      std::filesystem::remove(log_path, ignored);
+    } else {
+      std::filesystem::resize_file(log_path, original_log_size, ignored);
+    }
+    ignored.clear();
+    if (original_index_size == 0) {
+      std::filesystem::remove(index_file_path, ignored);
+    } else {
+      std::filesystem::resize_file(index_file_path, original_index_size, ignored);
+    }
+    throw;
+  }
+  return {options_.topic,
+          options_.partition_id,
+          base_offset,
+          next_offset_,
+          timestamp,
+          static_cast<std::uint32_t>(decoded_records.size()),
+          uncompressed_bytes,
+          static_cast<std::uint32_t>(encoded_records.size()),
+          static_cast<std::uint32_t>(encoded.size()),
+          codec};
+}
+
 std::vector<Record> PartitionLog::read_from(std::uint64_t offset, std::size_t max_records,
                                             std::uintmax_t max_bytes) const {
   std::vector<Record> records;
@@ -472,11 +638,55 @@ std::vector<Record> PartitionLog::read_from(std::uint64_t offset, std::size_t ma
       throw std::runtime_error("failed to read record body");
     }
 
-    auto decoded = decode_record(options_.topic, options_.partition_id, record_bytes, body_and_crc);
-    records.push_back(std::move(decoded.record));
+    if (read_u16_be(body_and_crc, 0) == kBatchVersion) {
+      auto batch = decode_batch(options_.topic, options_.partition_id, record_bytes, body_and_crc,
+                                options_.max_uncompressed_batch_bytes);
+      if (entry.record_index >= batch.records.size()) {
+        throw std::runtime_error("batch index entry is out of range");
+      }
+      Record record;
+      record.metadata = {options_.topic, options_.partition_id, entry.offset,
+                         batch.metadata.timestamp_unix_ns,
+                         batch.metadata.stored_bytes / batch.metadata.record_count};
+      record.key = std::move(batch.records[entry.record_index].key);
+      record.value = std::move(batch.records[entry.record_index].message);
+      records.push_back(std::move(record));
+    } else {
+      auto decoded =
+          decode_record(options_.topic, options_.partition_id, record_bytes, body_and_crc);
+      records.push_back(std::move(decoded.record));
+    }
     emitted_bytes += record_bytes + sizeof(std::uint32_t);
   }
   return records;
+}
+
+std::optional<EncodedBatch> PartitionLog::read_encoded_batch(std::uint64_t offset) const {
+  const auto entry = std::find_if(index_.begin(), index_.end(),
+                                  [offset](const auto& item) { return item.offset == offset; });
+  if (entry == index_.end() || entry->record_index != 0) {
+    return std::nullopt;
+  }
+  std::ifstream segment{entry->segment_path, std::ios::binary};
+  if (!segment) {
+    throw std::runtime_error("failed to open encoded batch segment");
+  }
+  segment.seekg(static_cast<std::streamoff>(entry->file_position + sizeof(std::uint32_t)));
+  std::vector<std::uint8_t> body_and_crc(entry->record_bytes);
+  segment.read(reinterpret_cast<char*>(body_and_crc.data()),
+               static_cast<std::streamsize>(body_and_crc.size()));
+  if (!segment || read_u16_be(body_and_crc, 0) != kBatchVersion) {
+    return std::nullopt;
+  }
+  auto decoded = decode_batch(options_.topic, options_.partition_id, entry->record_bytes,
+                              body_and_crc, options_.max_uncompressed_batch_bytes);
+  EncodedBatch result;
+  result.metadata = decoded.metadata;
+  result.encoded_records.assign(
+      body_and_crc.begin() + static_cast<std::ptrdiff_t>(kFixedBatchBodyBytes),
+      body_and_crc.begin() +
+          static_cast<std::ptrdiff_t>(kFixedBatchBodyBytes + decoded.metadata.encoded_bytes));
+  return result;
 }
 
 RetentionStats PartitionLog::apply_retention(const RetentionPolicy& policy) {
@@ -654,14 +864,28 @@ void PartitionLog::recover() {
       }
 
       try {
-        const auto decoded =
-            decode_record(options_.topic, options_.partition_id, record_bytes, body_and_crc);
-        write_index_entry(rebuilt_index, decoded.record.metadata.offset,
-                          static_cast<std::uint64_t>(position), record_bytes);
-        index_.push_back({decoded.record.metadata.offset, static_cast<std::uint64_t>(position),
-                          record_bytes, segment.log_path});
-        next_offset_ = std::max(next_offset_, decoded.record.metadata.offset + 1);
-        ++recovery_stats_.records_recovered;
+        if (read_u16_be(body_and_crc, 0) == kBatchVersion) {
+          const auto batch = decode_batch(options_.topic, options_.partition_id, record_bytes,
+                                          body_and_crc, options_.max_uncompressed_batch_bytes);
+          for (std::uint32_t index = 0; index < batch.metadata.record_count; ++index) {
+            const auto offset = batch.metadata.base_offset + index;
+            write_index_entry(rebuilt_index, offset, static_cast<std::uint64_t>(position),
+                              record_bytes);
+            index_.push_back({offset, static_cast<std::uint64_t>(position), record_bytes,
+                              segment.log_path, index, batch.metadata.record_count});
+          }
+          next_offset_ = std::max(next_offset_, batch.metadata.next_offset);
+          recovery_stats_.records_recovered += batch.metadata.record_count;
+        } else {
+          const auto decoded =
+              decode_record(options_.topic, options_.partition_id, record_bytes, body_and_crc);
+          write_index_entry(rebuilt_index, decoded.record.metadata.offset,
+                            static_cast<std::uint64_t>(position), record_bytes);
+          index_.push_back({decoded.record.metadata.offset, static_cast<std::uint64_t>(position),
+                            record_bytes, segment.log_path});
+          next_offset_ = std::max(next_offset_, decoded.record.metadata.offset + 1);
+          ++recovery_stats_.records_recovered;
+        }
       } catch (const std::exception&) {
         truncate = true;
         break;

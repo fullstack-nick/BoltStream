@@ -1,0 +1,31 @@
+﻿{
+    "schema_version":  2,
+    "evidence":  "single-pair-functional-smoke",
+    "generated_at_utc":  "2026-07-11T14:35:28Z",
+    "preset":  "windows-gcc-debug",
+    "batch_records":  32,
+    "payload_bytes":  260,
+    "zstd_level":  3,
+    "results":  [
+                    {
+                        "codec":  "none",
+                        "records":  32,
+                        "logical_bytes":  8580,
+                        "encoded_bytes":  8580,
+                        "partition_log_bytes":  8624,
+                        "produce_batch_latency_ms":  102.38040000000001,
+                        "produce_records_per_second":  312.559825904177,
+                        "fetch_records_per_second":  671.72278000869039
+                    },
+                    {
+                        "codec":  "zstd",
+                        "records":  32,
+                        "logical_bytes":  8580,
+                        "encoded_bytes":  58,
+                        "partition_log_bytes":  102,
+                        "produce_batch_latency_ms":  65.9436,
+                        "produce_records_per_second":  485.26316427977855,
+                        "fetch_records_per_second":  1190.8704891128389
+                    }
+                ]
+}

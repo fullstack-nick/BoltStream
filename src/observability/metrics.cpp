@@ -10,7 +10,7 @@ namespace {
 
 using protocol::FrameType;
 
-constexpr std::array<FrameType, 18> kRequestOperations{
+constexpr std::array<FrameType, 19> kRequestOperations{
     FrameType::HealthRequest,        FrameType::MetadataRequest,
     FrameType::ProduceRequest,       FrameType::FetchRequest,
     FrameType::OffsetCommitRequest,  FrameType::AuthRequest,
@@ -19,7 +19,8 @@ constexpr std::array<FrameType, 18> kRequestOperations{
     FrameType::LeaveGroupRequest,    FrameType::GroupOffsetCommitRequest,
     FrameType::ListTopicsRequest,    FrameType::DescribeTopicRequest,
     FrameType::DeleteTopicRequest,   FrameType::RunRetentionRequest,
-    FrameType::DescribeGroupRequest, FrameType::ResetGroupOffsetRequest};
+    FrameType::DescribeGroupRequest, FrameType::ResetGroupOffsetRequest,
+    FrameType::ProduceBatchRequest};
 
 void family(std::ostringstream& out, std::string_view name, std::string_view help,
             std::string_view type) {
@@ -207,6 +208,30 @@ void MetricsRegistry::record_append_batch(std::uint64_t records) {
   append_batch_records_.observe(records);
 }
 
+void MetricsRegistry::record_compression_batch(compression::Codec codec,
+                                               std::uint64_t logical_bytes,
+                                               std::uint64_t encoded_bytes) {
+  if (!enabled_ || !compression::is_supported(codec)) {
+    return;
+  }
+  const auto index = static_cast<std::size_t>(codec);
+  compression_batches_[index].fetch_add(1, std::memory_order_relaxed);
+  compression_logical_bytes_[index].fetch_add(logical_bytes, std::memory_order_relaxed);
+  compression_encoded_bytes_[index].fetch_add(encoded_bytes, std::memory_order_relaxed);
+}
+
+void MetricsRegistry::record_compression_decode_failure() {
+  if (enabled_) {
+    compression_decode_failures_.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void MetricsRegistry::record_compressed_fetch_passthrough() {
+  if (enabled_) {
+    compressed_fetch_passthroughs_.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
 void MetricsRegistry::record_group_rebalance() {
   if (enabled_) {
     group_rebalances_.fetch_add(1, std::memory_order_relaxed);
@@ -278,6 +303,16 @@ RegistrySnapshot MetricsRegistry::snapshot() const {
   result.records_produced = records_produced_.load(std::memory_order_relaxed);
   result.records_fetched = records_fetched_.load(std::memory_order_relaxed);
   result.append_batches = append_batches_.load(std::memory_order_relaxed);
+  for (std::size_t index = 0; index < 2; ++index) {
+    result.compression_batches[index] = compression_batches_[index].load(std::memory_order_relaxed);
+    result.compression_logical_bytes[index] =
+        compression_logical_bytes_[index].load(std::memory_order_relaxed);
+    result.compression_encoded_bytes[index] =
+        compression_encoded_bytes_[index].load(std::memory_order_relaxed);
+  }
+  result.compression_decode_failures = compression_decode_failures_.load(std::memory_order_relaxed);
+  result.compressed_fetch_passthroughs =
+      compressed_fetch_passthroughs_.load(std::memory_order_relaxed);
   result.append_batch_records = append_batch_records_.snapshot();
   result.group_rebalances = group_rebalances_.load(std::memory_order_relaxed);
   result.group_heartbeat_failures = group_heartbeat_failures_.load(std::memory_order_relaxed);
@@ -394,6 +429,28 @@ std::string render_prometheus(const RuntimeMetricsSnapshot& snapshot) {
   family(out, "boltstream_append_batches_total", "Storage append batches flushed since startup.",
          "counter");
   sample(out, "boltstream_append_batches_total", registry.append_batches);
+  family(out, "boltstream_compression_batches_total", "Stored batches by compression codec.",
+         "counter");
+  family(out, "boltstream_compression_logical_bytes_total",
+         "Logical record-set bytes by compression codec.", "counter");
+  family(out, "boltstream_compression_encoded_bytes_total",
+         "Encoded record-set bytes by compression codec.", "counter");
+  for (std::size_t index = 0; index < 2; ++index) {
+    const auto codec = std::string{compression::codec_name(static_cast<compression::Codec>(index))};
+    out << "boltstream_compression_batches_total" << labels({{"codec", codec}}) << ' '
+        << registry.compression_batches[index] << '\n';
+    out << "boltstream_compression_logical_bytes_total" << labels({{"codec", codec}}) << ' '
+        << registry.compression_logical_bytes[index] << '\n';
+    out << "boltstream_compression_encoded_bytes_total" << labels({{"codec", codec}}) << ' '
+        << registry.compression_encoded_bytes[index] << '\n';
+  }
+  family(out, "boltstream_compression_decode_failures_total",
+         "Rejected compressed batches that failed bounded decoding.", "counter");
+  sample(out, "boltstream_compression_decode_failures_total", registry.compression_decode_failures);
+  family(out, "boltstream_compressed_fetch_passthrough_total",
+         "Compressed storage batches forwarded without recompression.", "counter");
+  sample(out, "boltstream_compressed_fetch_passthrough_total",
+         registry.compressed_fetch_passthroughs);
   family(out, "boltstream_append_batch_records", "Records contained in storage append batches.",
          "histogram");
   {

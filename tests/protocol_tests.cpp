@@ -175,7 +175,8 @@ TEST(ProtocolTests, OverloadedErrorIsRetryable) {
 }
 
 TEST(ProtocolTests, PhaseSevenErrorsAndFrameNamesAreStable) {
-  EXPECT_EQ(boltstream::protocol::kProtocolVersion, 4U);
+  EXPECT_EQ(boltstream::protocol::kProtocolVersion, 5U);
+  EXPECT_EQ(boltstream::protocol::kMinimumProtocolVersion, 4U);
   EXPECT_EQ(
       boltstream::protocol::frame_type_name(boltstream::protocol::FrameType::JoinGroupRequest),
       "join_group_request");

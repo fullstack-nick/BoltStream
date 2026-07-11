@@ -8,6 +8,7 @@ namespace boltstream::protocol {
 namespace {
 
 constexpr std::size_t kHeaderCrcOffset = 28;
+constexpr std::uint32_t kCompressedFetchMarker = 0x42544348U;
 
 void write_u16(std::vector<std::uint8_t>& out, std::uint16_t value) {
   out.push_back(static_cast<std::uint8_t>((value >> 8U) & 0xFFU));
@@ -263,6 +264,10 @@ std::string_view frame_type_name(FrameType frame_type) {
     return "reset_group_offset_request";
   case FrameType::ResetGroupOffsetResponse:
     return "reset_group_offset_response";
+  case FrameType::ProduceBatchRequest:
+    return "produce_batch_request";
+  case FrameType::ProduceBatchResponse:
+    return "produce_batch_response";
   }
   return "unknown";
 }
@@ -309,6 +314,10 @@ std::string_view error_code_name(ErrorCode error_code) {
     return "offset_out_of_range";
   case ErrorCode::GroupActive:
     return "group_active";
+  case ErrorCode::UnsupportedCodec:
+    return "unsupported_codec";
+  case ErrorCode::InvalidBatch:
+    return "invalid_batch";
   }
   return "unknown_error";
 }
@@ -337,6 +346,7 @@ bool is_request_type(FrameType frame_type) {
   case FrameType::RunRetentionRequest:
   case FrameType::DescribeGroupRequest:
   case FrameType::ResetGroupOffsetRequest:
+  case FrameType::ProduceBatchRequest:
     return true;
   default:
     return false;
@@ -357,11 +367,17 @@ std::uint32_t crc32(std::span<const std::uint8_t> bytes) {
 
 std::vector<std::uint8_t> encode_frame(FrameType frame_type, std::uint64_t correlation_id,
                                        std::span<const std::uint8_t> payload, std::uint32_t flags) {
+  return encode_frame(kProtocolVersion, frame_type, correlation_id, payload, flags);
+}
+
+std::vector<std::uint8_t> encode_frame(std::uint16_t version, FrameType frame_type,
+                                       std::uint64_t correlation_id,
+                                       std::span<const std::uint8_t> payload, std::uint32_t flags) {
   std::vector<std::uint8_t> out;
   out.reserve(kFrameHeaderBytes + payload.size());
 
   write_u32(out, kMagic);
-  write_u16(out, kProtocolVersion);
+  write_u16(out, version);
   write_u16(out, static_cast<std::uint16_t>(frame_type));
   write_u32(out, kFrameHeaderBytes);
   write_u32(out, static_cast<std::uint32_t>(payload.size()));
@@ -397,7 +413,7 @@ HeaderDecodeResult decode_header(std::span<const std::uint8_t> bytes,
     result.message = "invalid frame magic";
     return result;
   }
-  if (result.header.version != kProtocolVersion) {
+  if (result.header.version < kMinimumProtocolVersion || result.header.version > kProtocolVersion) {
     result.error = ErrorCode::UnsupportedVersion;
     result.message = "unsupported protocol version";
     return result;
@@ -415,7 +431,7 @@ HeaderDecodeResult decode_header(std::span<const std::uint8_t> bytes,
   }
   if (result.header.flags != 0) {
     result.error = ErrorCode::ReservedFlags;
-    result.message = "reserved frame flags are not supported in protocol version 4";
+    result.message = "reserved frame flags are not supported";
     return result;
   }
 
@@ -592,6 +608,97 @@ DecodeResult decode_produce_request(std::span<const std::uint8_t> payload,
 DecodeResult validate_produce_request(std::span<const std::uint8_t> payload) {
   ProduceRequest request;
   return decode_produce_request(payload, request);
+}
+
+std::vector<std::uint8_t> encode_record_set(std::span<const BatchRecord> records) {
+  std::vector<std::uint8_t> out;
+  write_u32(out, static_cast<std::uint32_t>(records.size()));
+  for (const auto& record : records) {
+    write_bytes(out, record.key);
+    write_bytes(out, record.message);
+  }
+  return out;
+}
+
+DecodeResult decode_record_set(std::span<const std::uint8_t> payload, std::uint32_t expected_count,
+                               std::vector<BatchRecord>& records) {
+  PayloadReader reader{payload};
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count) || count != expected_count) {
+    return error_result(ErrorCode::InvalidBatch, "record-set count mismatch");
+  }
+  records.clear();
+  records.reserve(count);
+  for (std::uint32_t index = 0; index < count; ++index) {
+    BatchRecord record;
+    if (!reader.read_bytes(record.key) || !reader.read_bytes(record.message) ||
+        record.message.empty()) {
+      return error_result(ErrorCode::InvalidBatch, "malformed record set");
+    }
+    records.push_back(std::move(record));
+  }
+  if (!reader.done()) {
+    return error_result(ErrorCode::InvalidBatch, "trailing record-set bytes");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_produce_batch_request(const ProduceBatchRequest& request) {
+  std::vector<std::uint8_t> out;
+  write_string(out, request.topic);
+  write_u16(out, request.partition);
+  write_u16(out, static_cast<std::uint16_t>(request.codec));
+  write_u32(out, request.record_count);
+  write_u32(out, request.uncompressed_bytes);
+  write_bytes(out, request.encoded_records);
+  return out;
+}
+
+DecodeResult decode_produce_batch_request(std::span<const std::uint8_t> payload,
+                                          ProduceBatchRequest& request) {
+  PayloadReader reader{payload};
+  std::uint16_t codec = 0;
+  if (!reader.read_string(request.topic) || !reader.read_u16(request.partition) ||
+      !reader.read_u16(codec) || !reader.read_u32(request.record_count) ||
+      !reader.read_u32(request.uncompressed_bytes) || !reader.read_bytes(request.encoded_records) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed produce-batch request");
+  }
+  request.codec = static_cast<compression::Codec>(codec);
+  if (request.topic.empty() || request.record_count == 0 || request.uncompressed_bytes == 0 ||
+      request.encoded_records.empty()) {
+    return error_result(ErrorCode::InvalidBatch, "produce batch must not be empty");
+  }
+  if (!compression::is_supported(request.codec)) {
+    return error_result(ErrorCode::UnsupportedCodec, "unsupported compression codec");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_produce_batch_response(const ProduceBatchResponse& response) {
+  std::vector<std::uint8_t> out;
+  write_string(out, response.topic);
+  write_u16(out, response.partition);
+  write_u64(out, response.base_offset);
+  write_u64(out, response.next_offset);
+  write_u32(out, response.record_count);
+  write_u32(out, response.logical_bytes);
+  write_u32(out, response.encoded_bytes);
+  write_u32(out, response.stored_bytes);
+  return out;
+}
+
+DecodeResult decode_produce_batch_response(std::span<const std::uint8_t> payload,
+                                           ProduceBatchResponse& response) {
+  PayloadReader reader{payload};
+  if (!reader.read_string(response.topic) || !reader.read_u16(response.partition) ||
+      !reader.read_u64(response.base_offset) || !reader.read_u64(response.next_offset) ||
+      !reader.read_u32(response.record_count) || !reader.read_u32(response.logical_bytes) ||
+      !reader.read_u32(response.encoded_bytes) || !reader.read_u32(response.stored_bytes) ||
+      !reader.done()) {
+    return error_result(ErrorCode::MalformedPayload, "malformed produce-batch response");
+  }
+  return ok_result();
 }
 
 std::vector<std::uint8_t> encode_fetch_request(std::string_view topic, std::uint16_t partition,
@@ -1288,6 +1395,26 @@ std::vector<std::uint8_t> encode_fetch_response(const FetchResponse& response) {
   return out;
 }
 
+std::vector<std::uint8_t>
+encode_compressed_fetch_response(std::string_view topic, std::uint16_t partition,
+                                 std::uint64_t from_offset, std::uint64_t next_offset,
+                                 std::uint64_t timestamp_unix_ns, compression::Codec codec,
+                                 std::uint32_t record_count, std::uint32_t uncompressed_bytes,
+                                 std::span<const std::uint8_t> encoded_records) {
+  std::vector<std::uint8_t> out;
+  write_string(out, topic);
+  write_u16(out, partition);
+  write_u64(out, from_offset);
+  write_u64(out, next_offset);
+  write_u32(out, kCompressedFetchMarker);
+  write_u16(out, static_cast<std::uint16_t>(codec));
+  write_u64(out, timestamp_unix_ns);
+  write_u32(out, record_count);
+  write_u32(out, uncompressed_bytes);
+  write_bytes(out, encoded_records);
+  return out;
+}
+
 DecodeResult decode_fetch_response(std::span<const std::uint8_t> payload, FetchResponse& response) {
   PayloadReader reader{payload};
   std::uint32_t record_count = 0;
@@ -1298,6 +1425,36 @@ DecodeResult decode_fetch_response(std::span<const std::uint8_t> payload, FetchR
   }
 
   response.records.clear();
+  if (record_count == kCompressedFetchMarker) {
+    std::uint16_t codec_value = 0;
+    std::uint64_t timestamp = 0;
+    std::uint32_t count = 0;
+    std::uint32_t uncompressed = 0;
+    std::vector<std::uint8_t> encoded;
+    if (!reader.read_u16(codec_value) || !reader.read_u64(timestamp) || !reader.read_u32(count) ||
+        !reader.read_u32(uncompressed) || !reader.read_bytes(encoded) || !reader.done()) {
+      return error_result(ErrorCode::MalformedPayload, "malformed compressed fetch response");
+    }
+    const auto codec = static_cast<compression::Codec>(codec_value);
+    try {
+      const auto raw = compression::decompress(codec, encoded, uncompressed, kDefaultMaxFrameBytes);
+      std::vector<BatchRecord> batch_records;
+      const auto decoded = decode_record_set(raw, count, batch_records);
+      if (!decoded.ok) {
+        return decoded;
+      }
+      response.records.reserve(count);
+      for (std::uint32_t index = 0; index < count; ++index) {
+        response.records.push_back({response.from_offset + index, timestamp,
+                                    std::move(batch_records[index].key),
+                                    std::move(batch_records[index].message),
+                                    static_cast<std::uint32_t>(encoded.size() / count)});
+      }
+      return ok_result();
+    } catch (const std::exception& error) {
+      return error_result(ErrorCode::InvalidBatch, error.what());
+    }
+  }
   response.records.reserve(record_count);
   for (std::uint32_t index = 0; index < record_count; ++index) {
     FetchRecord record;
@@ -1326,10 +1483,52 @@ std::vector<std::uint8_t> encode_metadata_response(std::span<const MetadataTopic
   return out;
 }
 
+std::vector<std::uint8_t> encode_metadata_request(std::uint32_t supported_codecs) {
+  std::vector<std::uint8_t> out;
+  write_u32(out, supported_codecs);
+  return out;
+}
+
+DecodeResult decode_metadata_request(std::span<const std::uint8_t> payload,
+                                     std::uint32_t& supported_codecs) {
+  PayloadReader reader{payload};
+  if (!reader.read_u32(supported_codecs) || !reader.done() ||
+      (supported_codecs & compression::kNoneMask) == 0U) {
+    return error_result(ErrorCode::MalformedPayload, "malformed metadata capabilities");
+  }
+  return ok_result();
+}
+
+std::vector<std::uint8_t> encode_metadata_response(const MetadataResponse& response,
+                                                   std::uint16_t protocol_version) {
+  if (protocol_version == 4) {
+    return encode_metadata_response(response.topics);
+  }
+  std::vector<std::uint8_t> out;
+  write_u32(out, response.supported_codecs);
+  write_u32(out, response.negotiated_codecs);
+  const auto topics = encode_metadata_response(response.topics);
+  out.insert(out.end(), topics.begin(), topics.end());
+  return out;
+}
+
 DecodeResult decode_metadata_response(std::span<const std::uint8_t> payload,
-                                      MetadataResponse& response) {
+                                      MetadataResponse& response, std::uint16_t protocol_version) {
+  if (protocol_version == 0) {
+    protocol_version =
+        payload.size() >= 8 && (read_u32_be(payload, 0) & compression::kNoneMask) != 0U &&
+                (read_u32_be(payload, 0) & ~compression::kSupportedCodecMask) == 0U &&
+                (read_u32_be(payload, 4) & compression::kNoneMask) != 0U &&
+                (read_u32_be(payload, 4) & ~compression::kSupportedCodecMask) == 0U
+            ? 5
+            : 4;
+  }
   PayloadReader reader{payload};
   std::uint32_t topic_count = 0;
+  if (protocol_version >= 5 && (!reader.read_u32(response.supported_codecs) ||
+                                !reader.read_u32(response.negotiated_codecs))) {
+    return error_result(ErrorCode::MalformedPayload, "malformed metadata capabilities");
+  }
   if (!reader.read_u32(topic_count)) {
     return error_result(ErrorCode::MalformedPayload, "malformed metadata response payload");
   }

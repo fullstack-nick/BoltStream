@@ -20,9 +20,10 @@ boost::system::error_code message_size_error() {
 
 } // namespace
 
-AsyncClient::AsyncClient(boost::asio::io_context& io, std::uint32_t max_frame_bytes)
+AsyncClient::AsyncClient(boost::asio::io_context& io, std::uint32_t max_frame_bytes,
+                         std::uint16_t protocol_version)
     : strand_(boost::asio::make_strand(io)), resolver_(strand_), socket_(strand_),
-      max_frame_bytes_(max_frame_bytes) {}
+      max_frame_bytes_(max_frame_bytes), protocol_version_(protocol_version) {}
 
 AsyncClient::~AsyncClient() { close(); }
 
@@ -67,7 +68,7 @@ void AsyncClient::async_request_impl(protocol::FrameType frame_type,
 
     const auto correlation_id = next_correlation_id_++;
     auto bytes = std::make_shared<std::vector<std::uint8_t>>(
-        protocol::encode_frame(frame_type, correlation_id, payload));
+        protocol::encode_frame(protocol_version_, frame_type, correlation_id, payload));
     pending_.emplace(correlation_id, std::move(handler));
     write_queue_.push_back(bytes);
     if (write_queue_.size() == 1) {

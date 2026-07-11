@@ -198,7 +198,8 @@ ConfigResult apply_retention(const YAML::Node& node, broker::ServerOptions& opti
 ConfigResult apply_limits(const YAML::Node& node, broker::ServerOptions& options) {
   auto valid =
       validate_mapping(node, "limits",
-                       {"max_frame_bytes", "max_fetch_records", "max_fetch_bytes",
+                       {"max_frame_bytes", "max_produce_batch_records",
+                        "max_uncompressed_batch_bytes", "max_fetch_records", "max_fetch_bytes",
                         "max_topic_partitions", "max_fetch_wait_ms", "max_append_queue_depth",
                         "append_workers", "max_broker_connections", "max_long_poll_waiters"});
   if (!valid.ok) {
@@ -210,6 +211,15 @@ ConfigResult apply_limits(const YAML::Node& node, broker::ServerOptions& options
     if (key == "max_frame_bytes") {
       parsed =
           scalar_unsigned(item.second, "limits.max_frame_bytes", options.max_frame_bytes, false);
+    } else if (key == "max_produce_batch_records") {
+      parsed = scalar_unsigned(item.second, "limits.max_produce_batch_records",
+                               options.max_produce_batch_records, false);
+      if (parsed.ok && options.max_produce_batch_records > 1024) {
+        return failure("limits.max_produce_batch_records exceeds 1024", item.second);
+      }
+    } else if (key == "max_uncompressed_batch_bytes") {
+      parsed = scalar_unsigned(item.second, "limits.max_uncompressed_batch_bytes",
+                               options.max_uncompressed_batch_bytes, false);
     } else if (key == "max_fetch_records") {
       parsed = scalar_unsigned(item.second, "limits.max_fetch_records", options.max_fetch_records,
                                false);
@@ -370,6 +380,8 @@ std::string effective_config_yaml(const broker::ServerOptions& options, bool aut
   out << "  check_interval_ms: " << options.retention_check_interval_ms << "\n";
   out << "limits:\n";
   out << "  max_frame_bytes: " << options.max_frame_bytes << "\n";
+  out << "  max_produce_batch_records: " << options.max_produce_batch_records << "\n";
+  out << "  max_uncompressed_batch_bytes: " << options.max_uncompressed_batch_bytes << "\n";
   out << "  max_fetch_records: " << options.max_fetch_records << "\n";
   out << "  max_fetch_bytes: " << options.max_fetch_bytes << "\n";
   out << "  max_topic_partitions: " << options.max_topic_partitions << "\n";

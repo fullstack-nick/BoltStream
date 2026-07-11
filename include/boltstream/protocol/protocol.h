@@ -1,5 +1,7 @@
 #pragma once
 
+#include "boltstream/compression/compression.h"
+
 #include <cstdint>
 #include <span>
 #include <string>
@@ -9,7 +11,8 @@
 namespace boltstream::protocol {
 
 inline constexpr std::uint32_t kMagic = 0x42535452U;
-inline constexpr std::uint16_t kProtocolVersion = 4;
+inline constexpr std::uint16_t kProtocolVersion = 5;
+inline constexpr std::uint16_t kMinimumProtocolVersion = 4;
 inline constexpr std::uint32_t kFrameHeaderBytes = 32;
 inline constexpr std::uint32_t kDefaultMaxFrameBytes = 1024 * 1024;
 
@@ -51,6 +54,8 @@ enum class FrameType : std::uint16_t {
   DescribeGroupResponse = 35,
   ResetGroupOffsetRequest = 36,
   ResetGroupOffsetResponse = 37,
+  ProduceBatchRequest = 38,
+  ProduceBatchResponse = 39,
 };
 
 enum class ErrorCode : std::uint32_t {
@@ -74,6 +79,8 @@ enum class ErrorCode : std::uint32_t {
   StaleMember = 18,
   OffsetOutOfRange = 19,
   GroupActive = 20,
+  UnsupportedCodec = 21,
+  InvalidBatch = 22,
 };
 
 struct FrameHeader {
@@ -139,6 +146,31 @@ struct ProduceRequest {
   std::string topic;
   std::vector<std::uint8_t> key;
   std::vector<std::uint8_t> message;
+};
+
+struct BatchRecord {
+  std::vector<std::uint8_t> key;
+  std::vector<std::uint8_t> message;
+};
+
+struct ProduceBatchRequest {
+  std::string topic;
+  std::uint16_t partition{0};
+  compression::Codec codec{compression::Codec::None};
+  std::uint32_t record_count{0};
+  std::uint32_t uncompressed_bytes{0};
+  std::vector<std::uint8_t> encoded_records;
+};
+
+struct ProduceBatchResponse {
+  std::string topic;
+  std::uint16_t partition{0};
+  std::uint64_t base_offset{0};
+  std::uint64_t next_offset{0};
+  std::uint32_t record_count{0};
+  std::uint32_t logical_bytes{0};
+  std::uint32_t encoded_bytes{0};
+  std::uint32_t stored_bytes{0};
 };
 
 struct FetchRequest {
@@ -370,6 +402,8 @@ struct MetadataTopic {
 };
 
 struct MetadataResponse {
+  std::uint32_t supported_codecs{compression::kNoneMask};
+  std::uint32_t negotiated_codecs{compression::kNoneMask};
   std::vector<MetadataTopic> topics;
 };
 
@@ -381,6 +415,10 @@ bool is_request_type(FrameType frame_type);
 std::uint32_t crc32(std::span<const std::uint8_t> bytes);
 
 std::vector<std::uint8_t> encode_frame(FrameType frame_type, std::uint64_t correlation_id,
+                                       std::span<const std::uint8_t> payload,
+                                       std::uint32_t flags = 0);
+std::vector<std::uint8_t> encode_frame(std::uint16_t version, FrameType frame_type,
+                                       std::uint64_t correlation_id,
                                        std::span<const std::uint8_t> payload,
                                        std::uint32_t flags = 0);
 HeaderDecodeResult decode_header(std::span<const std::uint8_t> bytes,
@@ -413,6 +451,16 @@ std::vector<std::uint8_t> encode_produce_request(std::string_view topic,
                                                  std::span<const std::uint8_t> message);
 DecodeResult decode_produce_request(std::span<const std::uint8_t> payload, ProduceRequest& request);
 DecodeResult validate_produce_request(std::span<const std::uint8_t> payload);
+
+std::vector<std::uint8_t> encode_record_set(std::span<const BatchRecord> records);
+DecodeResult decode_record_set(std::span<const std::uint8_t> payload, std::uint32_t expected_count,
+                               std::vector<BatchRecord>& records);
+std::vector<std::uint8_t> encode_produce_batch_request(const ProduceBatchRequest& request);
+DecodeResult decode_produce_batch_request(std::span<const std::uint8_t> payload,
+                                          ProduceBatchRequest& request);
+std::vector<std::uint8_t> encode_produce_batch_response(const ProduceBatchResponse& response);
+DecodeResult decode_produce_batch_response(std::span<const std::uint8_t> payload,
+                                           ProduceBatchResponse& response);
 
 std::vector<std::uint8_t> encode_fetch_request(std::string_view topic, std::uint16_t partition,
                                                std::string_view from, std::string_view group,
@@ -509,11 +557,23 @@ DecodeResult decode_produce_response(std::span<const std::uint8_t> payload,
                                      ProduceResponse& response);
 
 std::vector<std::uint8_t> encode_fetch_response(const FetchResponse& response);
+std::vector<std::uint8_t>
+encode_compressed_fetch_response(std::string_view topic, std::uint16_t partition,
+                                 std::uint64_t from_offset, std::uint64_t next_offset,
+                                 std::uint64_t timestamp_unix_ns, compression::Codec codec,
+                                 std::uint32_t record_count, std::uint32_t uncompressed_bytes,
+                                 std::span<const std::uint8_t> encoded_records);
 DecodeResult decode_fetch_response(std::span<const std::uint8_t> payload, FetchResponse& response);
 
 std::vector<std::uint8_t> encode_metadata_response(std::span<const MetadataTopic> topics);
+std::vector<std::uint8_t> encode_metadata_request(std::uint32_t supported_codecs);
+DecodeResult decode_metadata_request(std::span<const std::uint8_t> payload,
+                                     std::uint32_t& supported_codecs);
+std::vector<std::uint8_t> encode_metadata_response(const MetadataResponse& response,
+                                                   std::uint16_t protocol_version);
 DecodeResult decode_metadata_response(std::span<const std::uint8_t> payload,
-                                      MetadataResponse& response);
+                                      MetadataResponse& response,
+                                      std::uint16_t protocol_version = 0);
 
 DecodeResult validate_empty_payload(std::span<const std::uint8_t> payload);
 

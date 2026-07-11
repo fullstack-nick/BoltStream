@@ -2,17 +2,17 @@
 
 BoltStream is a C++20 low-latency event streaming engine: a Kafka-inspired broker built from scratch to demonstrate Linux networking, durable storage, concurrency, testing, performance measurement, and cloud-native deployment.
 
-Phase 9 adds strict YAML configuration, Prometheus metrics, hardened health
-contracts, structured operational logging, alerts, and a provisioned Grafana
-dashboard on top of the Phase 8 retention and lifecycle runtime.
+Phase 11 adds protocol-v5 `none`/`zstd` capability negotiation, producer-compressed
+record batches, mixed-format durable recovery, and zero-recompression compressed
+fetch pass-through while retaining protocol-v4 and storage-v2 readability.
 
-## Current Phase 9 Surface
+## Current Phase 11 Surface
 
 - `boltstream-server` opens broker TCP port `9000`.
 - Admin HTTP listens on `127.0.0.1:9100`.
 - `GET /health/live` reports process liveness.
 - `GET /health/ready` reports data-directory readiness.
-- `GET /version` reports service name, Git SHA, build type, compiler, protocol version `4`, storage format version `2`, and startup time.
+- `GET /version` reports service name, Git SHA, build type, compiler, protocol version `5`, storage format version `3`, and startup time.
 - `GET /metrics` exposes Prometheus text `0.0.4` for traffic, latency, connections,
   queues, storage, consumer lag, retention, recovery, and filesystem capacity.
 - `--config`, `--check-config`, and `--print-effective-config` provide strict YAML
@@ -23,10 +23,14 @@ dashboard on top of the Phase 8 retention and lifecycle runtime.
 - `boltstream-admin retention run` applies broker retention policy and reports deleted segments/bytes.
 - `boltstream-admin groups describe|reset-offset` inspects and resets inactive group offsets.
 - `boltstream-producer` appends durable records through the broker and prints assigned topic, partition, offset, and next offset.
+- `boltstream-producer --batch-records 32 --compression zstd` compresses once in the
+  client; the broker validates and stores the exact zstd payload.
 - `boltstream-consumer` fetches durable records from `beginning`, `latest`, `committed`, or an explicit offset for a chosen partition.
 - `boltstream-consumer --group GROUP --commit` commits the returned partition `next_offset` to a durable group offset log.
 - `boltstream-consumer --coordinated --group GROUP --commit` joins a broker-managed group, receives automatic partition assignments, heartbeats, rejoins on rebalances, and commits offsets fenced by member generation.
 - Long-poll fetch is available with `boltstream-consumer --wait-ms MS`.
+- `boltstream-consumer --compression zstd` negotiates compressed fetch capability and
+  transparently decodes pass-through zstd batches.
 - Append queues are bounded per partition and return retryable `overloaded` errors instead of growing without limit.
 - Long-poll waiter state, broker sessions, frame sizes, fetch records, and fetch bytes are bounded by server options.
 - Segment retention is configurable by age and size. Retention deletes inactive complete segments and exposes retained low watermarks.
@@ -56,6 +60,19 @@ Limited GCP `e2-micro` results for exact commit `14d225abe1d5` (two complete rou
 See [docs/benchmarks.md](docs/benchmarks.md) for methodology, fetch results, dispersion, and the canonical JSON.
 
 <!-- PHASE10_BENCHMARK_END -->
+
+## Phase 11 Compression Smoke
+
+One native Windows GCC Debug functional pair (32 records, 260-byte deterministic
+payload, zstd level 3) produced the following storage result:
+
+| Codec | Logical bytes | Encoded bytes | Partition log bytes |
+| --- | ---: | ---: | ---: |
+| none | 8,580 | 8,580 | 8,624 |
+| zstd | 8,580 | 58 | 102 |
+
+This single sample validates the comparison and pass-through path; it is not a capacity
+or statistical performance claim. See [the Phase 11 compression smoke](docs/compression-benchmarks.md).
 
 ## Native Windows Build
 

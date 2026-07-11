@@ -1,8 +1,11 @@
 #pragma once
 
+#include "boltstream/compression/compression.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -23,6 +26,7 @@ struct PartitionLogOptions {
   std::uint16_t partition_id{kPhaseThreePartition};
   std::uintmax_t max_segment_bytes{kDefaultMaxSegmentBytes};
   std::uint64_t segment_max_age_seconds{kDefaultSegmentMaxAgeSeconds};
+  std::uint32_t max_uncompressed_batch_bytes{1024U * 1024U};
 };
 
 struct RecordMetadata {
@@ -42,6 +46,24 @@ struct Record {
 struct AppendRecord {
   std::span<const std::uint8_t> key;
   std::span<const std::uint8_t> value;
+};
+
+struct BatchMetadata {
+  std::string topic;
+  std::uint16_t partition{0};
+  std::uint64_t base_offset{0};
+  std::uint64_t next_offset{0};
+  std::uint64_t timestamp_unix_ns{0};
+  std::uint32_t record_count{0};
+  std::uint32_t logical_bytes{0};
+  std::uint32_t encoded_bytes{0};
+  std::uint32_t stored_bytes{0};
+  compression::Codec codec{compression::Codec::None};
+};
+
+struct EncodedBatch {
+  BatchMetadata metadata;
+  std::vector<std::uint8_t> encoded_records;
 };
 
 struct RecoveryStats {
@@ -99,8 +121,13 @@ public:
 
   RecordMetadata append(std::span<const std::uint8_t> key, std::span<const std::uint8_t> value);
   std::vector<RecordMetadata> append_batch(std::span<const AppendRecord> records);
+  BatchMetadata append_encoded_batch(compression::Codec codec,
+                                     std::span<const std::uint8_t> encoded_records,
+                                     std::uint32_t uncompressed_bytes,
+                                     std::span<const AppendRecord> decoded_records);
   std::vector<Record> read_from(std::uint64_t offset, std::size_t max_records,
                                 std::uintmax_t max_bytes) const;
+  std::optional<EncodedBatch> read_encoded_batch(std::uint64_t offset) const;
   RetentionStats apply_retention(const RetentionPolicy& policy);
 
   [[nodiscard]] std::uint64_t earliest_offset() const;
@@ -117,6 +144,8 @@ private:
     std::uint64_t file_position{0};
     std::uint32_t record_bytes{0};
     std::filesystem::path segment_path;
+    std::uint32_t record_index{0};
+    std::uint32_t record_count{1};
   };
 
   void recover();

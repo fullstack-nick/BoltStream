@@ -20,7 +20,8 @@ namespace boltstream::client {
 class AsyncClient {
 public:
   explicit AsyncClient(boost::asio::io_context& io,
-                       std::uint32_t max_frame_bytes = protocol::kDefaultMaxFrameBytes);
+                       std::uint32_t max_frame_bytes = protocol::kDefaultMaxFrameBytes,
+                       std::uint16_t protocol_version = protocol::kProtocolVersion);
   AsyncClient(const AsyncClient&) = delete;
   AsyncClient& operator=(const AsyncClient&) = delete;
   ~AsyncClient();
@@ -63,8 +64,12 @@ public:
                          std::forward<CompletionToken>(token));
   }
 
-  template <typename CompletionToken> auto async_metadata(CompletionToken&& token) {
-    return async_request(protocol::FrameType::MetadataRequest, {},
+  template <typename CompletionToken>
+  auto async_metadata(CompletionToken&& token,
+                      std::uint32_t codecs = compression::kSupportedCodecMask) {
+    return async_request(protocol::FrameType::MetadataRequest,
+                         protocol_version_ >= 5 ? protocol::encode_metadata_request(codecs)
+                                                : std::vector<std::uint8_t>{},
                          std::forward<CompletionToken>(token));
   }
 
@@ -80,6 +85,13 @@ public:
                      std::span<const std::uint8_t> message, CompletionToken&& token) {
     return async_request(protocol::FrameType::ProduceRequest,
                          protocol::encode_produce_request(topic, key, message),
+                         std::forward<CompletionToken>(token));
+  }
+
+  template <typename CompletionToken>
+  auto async_produce_batch(const protocol::ProduceBatchRequest& request, CompletionToken&& token) {
+    return async_request(protocol::FrameType::ProduceBatchRequest,
+                         protocol::encode_produce_batch_request(request),
                          std::forward<CompletionToken>(token));
   }
 
@@ -204,6 +216,7 @@ private:
   boost::asio::ip::tcp::resolver resolver_;
   boost::asio::ip::tcp::socket socket_;
   std::uint32_t max_frame_bytes_;
+  std::uint16_t protocol_version_;
   std::uint64_t next_correlation_id_{1};
   std::array<std::uint8_t, protocol::kFrameHeaderBytes> header_buffer_{};
   std::vector<std::uint8_t> payload_buffer_;

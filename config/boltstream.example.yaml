@@ -14,6 +14,8 @@ retention:
   check_interval_ms: 60000
 limits:
   max_frame_bytes: 1048576
+  max_produce_batch_records: 1024
+  max_uncompressed_batch_bytes: 1048576
   max_fetch_records: 100
   max_fetch_bytes: 1048576
   max_topic_partitions: 128

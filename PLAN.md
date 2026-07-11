@@ -1222,17 +1222,64 @@ live GCP proof path.
 
 ### Phase 11: Compression
 
-Deliverables:
+#### Locked Boundary
 
-- zstd batch compression.
-- Compression negotiation in protocol metadata.
-- Compressed produce and fetch path.
-- Compression benchmark mode.
+- Upgrade the current protocol to version `5` and storage format to `3`, while the
+  broker continues to accept protocol-v4 frames and mixed legacy version-1 records.
+- Compression is client-side and per public produce batch. The broker validates with
+  bounded decompression and persists the producer's exact `none` or `zstd` payload;
+  it never recompresses. Replication, dictionaries, streaming compression, and new
+  listeners remain Phase 12 or excluded work.
+- Pin zstd `1.5.7` as a static FetchContent dependency with programs, tests, shared
+  libraries, legacy APIs, and multithreaded compression disabled.
 
-Acceptance:
+#### Protocol, Storage, and Operations
 
-- zstd and uncompressed clients interoperate according to negotiated capabilities.
-- Benchmarks compare throughput, latency, and bytes written.
+- Metadata v5 negotiates a required `none` capability and optional `zstd` capability
+  per connection. A skipped negotiation permits only `none`; changing protocol
+  versions on an established connection is rejected.
+- Add batch-produce frames `38/39`, a canonical length-prefixed key/value record set,
+  explicit partition, codec, record count, logical/encoded byte sizes, and a response
+  containing the assigned contiguous offset range and stored byte count.
+- Add strict batch limits of 1,024 records and 1 MiB uncompressed by default. Reject
+  unsupported codecs, corrupt frames, count/size mismatches, empty values, and zstd
+  expansion beyond the configured bound before storage mutation.
+- Storage batch version `2` carries codec, base offset, shared append timestamp,
+  record count, logical/encoded sizes, exact payload, and an outer CRC. Every logical
+  offset is indexed to the physical batch. Recovery supports legacy and batch entries
+  in one segment and truncates a corrupt trailing batch atomically.
+- Aligned v5 zstd fetches pass the stored batch through unchanged when negotiated and
+  within fetch/frame limits. V4, `none`, mid-batch, and limited fetches decode to the
+  existing record view without gaps or duplicates.
+- Producer/consumer CLIs expose `--compression`; producer additionally exposes
+  `--batch-records` and `--zstd-level`. Logtool exposes `inspect-batch`. Prometheus
+  publishes fixed-cardinality codec batch/byte, decode-failure, and pass-through
+  counters.
+
+#### Verification and Live Proof
+
+1. Cover codec bounds, protocol v4/v5 shapes, negotiation, mixed-format recovery,
+   corruption, mid-batch fallback, CLI round trips, metrics, and exact offsets locally.
+2. Run Linux Debug/Release, Windows MSVC, formatting, warnings-as-errors, existing
+   phase smokes, the Phase 11 smoke, and focused ThreadSanitizer coverage in CI.
+3. Compare one functional `none`/`zstd` smoke pair on the batched-writes settings with
+   32 records, level 3, and the deterministic compressible payload. Publish throughput,
+   batch acknowledgement latency, fetch throughput, and physical log bytes, explicitly
+   without a capacity or statistical-performance claim.
+4. Deploy the exact pushed and CI-tested Release artifact to the existing GCP VM. Use
+   isolated loopback listeners and `/var/lib/boltstream/phase11-*`, inspect stored zstd
+   batches and metrics, restore the normal service, remove temporary state, and prove
+   readiness, version, disk headroom, and a clean Terraform plan in `proof/phase-11.md`.
+
+#### Acceptance
+
+- V4, v5-none, and v5-zstd clients interoperate; aligned zstd fetch proves pass-through
+  and legacy/mid-batch fetch proves safe decode fallback.
+- The deterministic zstd smoke has zero errors, exact produced/fetched counts, and
+  fewer partition-log bytes than `none`; reports do not overstate the single sample.
+- Local, CI, packaged-artifact, isolated live GCP, cleanup, and drift evidence are all
+  durable. Existing normal data remains readable; rollback after normal data receives
+  format-3 batches requires the Phase 11 binary or a pre-enable snapshot.
 
 ### Phase 12: Replication Simulation
 

@@ -75,6 +75,22 @@ FetchContent_Declare(
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(yaml_cpp)
 
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_DICTBUILDER OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_DEPRECATED OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  zstd
+  URL https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+  URL_HASH SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  SOURCE_SUBDIR build/cmake)
+FetchContent_MakeAvailable(zstd)
+
 add_library(boost_headers INTERFACE)
 target_include_directories(boost_headers SYSTEM INTERFACE "${boost_headers_SOURCE_DIR}")
 target_compile_definitions(boost_headers INTERFACE BOOST_ASIO_HEADER_ONLY BOOST_ASIO_NO_DEPRECATED)
@@ -104,6 +120,7 @@ add_library(boltstream_core
   src/broker/server.cpp
   src/client/async_client.cpp
   src/common/build_info.cpp
+  src/compression/compression.cpp
   src/config/config.cpp
   src/observability/logger.cpp
   src/observability/metrics.cpp
@@ -121,6 +138,7 @@ target_link_libraries(boltstream_core
     Threads::Threads
   PRIVATE
     boltstream_warnings
+    libzstd_static
     yaml-cpp::yaml-cpp)
 if(WIN32)
   target_link_libraries(boltstream_core PUBLIC ws2_32 mswsock)
@@ -168,6 +186,7 @@ if(BOLTSTREAM_BUILD_TESTS AND BUILD_TESTING)
   add_executable(boltstream_tests
     tests/benchmark_statistics_tests.cpp
     tests/build_info_tests.cpp
+    tests/compression_tests.cpp
     tests/client_broker_tests.cpp
     tests/config_tests.cpp
     tests/group_coordinator_tests.cpp

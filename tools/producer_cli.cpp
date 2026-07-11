@@ -1,4 +1,5 @@
 #include "boltstream/client/async_client.h"
+#include "boltstream/compression/compression.h"
 
 #include <boost/asio.hpp>
 
@@ -23,6 +24,9 @@ struct ProducerOptions {
   std::string key;
   std::string message;
   std::string token;
+  boltstream::compression::Codec compression{boltstream::compression::Codec::None};
+  std::uint32_t batch_records{1};
+  int zstd_level{3};
   bool help_requested{false};
   std::string error;
 };
@@ -30,7 +34,8 @@ struct ProducerOptions {
 void usage() {
   std::cout << "Usage: boltstream-producer --topic TOPIC --message VALUE [--key KEY]\n"
                "                           [--host HOST] [--port PORT] [--timeout-ms MS]\n"
-               "                           [--token TOKEN]\n"
+               "                           [--token TOKEN] [--compression none|zstd]\n"
+               "                           [--batch-records N] [--zstd-level 1..19]\n"
                "\n"
                "Sends a binary protocol ProduceRequest and prints the broker-assigned offset.\n"
                "If --token is omitted, BOLTSTREAM_BROKER_TOKEN is used when present.\n";
@@ -121,6 +126,26 @@ ProducerOptions parse_options(int argc, char** argv) {
       options.message = std::string{require_value(arg)};
     } else if (arg == "--token") {
       options.token = std::string{require_value(arg)};
+    } else if (arg == "--compression") {
+      const auto value = require_value(arg);
+      if (value == "none") {
+        options.compression = boltstream::compression::Codec::None;
+      } else if (value == "zstd") {
+        options.compression = boltstream::compression::Codec::Zstd;
+      } else {
+        options.error = "--compression must be none or zstd";
+      }
+    } else if (arg == "--batch-records") {
+      int value = 0;
+      if (!parse_int(require_value(arg), value) || value > 1024) {
+        options.error = "--batch-records must be between 1 and 1024";
+      } else {
+        options.batch_records = static_cast<std::uint32_t>(value);
+      }
+    } else if (arg == "--zstd-level") {
+      if (!parse_int(require_value(arg), options.zstd_level) || options.zstd_level > 19) {
+        options.error = "--zstd-level must be between 1 and 19";
+      }
     } else {
       options.error = "unknown argument: " + std::string{arg};
       return options;
@@ -154,6 +179,23 @@ std::string json_escape(std::string_view value) {
 }
 
 int response_exit_code(const boltstream::protocol::Frame& frame) {
+  if (frame.header.frame_type == boltstream::protocol::FrameType::ProduceBatchResponse) {
+    boltstream::protocol::ProduceBatchResponse response;
+    const auto decoded =
+        boltstream::protocol::decode_produce_batch_response(frame.payload, response);
+    if (!decoded.ok) {
+      return 1;
+    }
+    std::cout << "{\"status\":\"ok\",\"topic\":\"" << json_escape(response.topic)
+              << "\",\"partition\":" << response.partition
+              << ",\"base_offset\":" << response.base_offset
+              << ",\"next_offset\":" << response.next_offset
+              << ",\"record_count\":" << response.record_count
+              << ",\"logical_bytes\":" << response.logical_bytes
+              << ",\"encoded_bytes\":" << response.encoded_bytes
+              << ",\"stored_bytes\":" << response.stored_bytes << "}\n";
+    return 0;
+  }
   if (frame.header.frame_type == boltstream::protocol::FrameType::ProduceResponse) {
     boltstream::protocol::ProduceResponse response;
     const auto decoded = boltstream::protocol::decode_produce_response(frame.payload, response);
@@ -253,17 +295,59 @@ int main(int argc, char** argv) {
         }
 
         auto send_produce = [&, client] {
-          client->async_produce(
-              options.topic, key_bytes, message_bytes,
-              [&](const boost::system::error_code& request_ec, boltstream::protocol::Frame frame) {
-                if (request_ec) {
-                  std::cerr << "boltstream-producer: request failed: " << request_ec.message()
-                            << '\n';
-                  finish(1);
+          auto send = [&, client] {
+            if (options.batch_records == 1 &&
+                options.compression == boltstream::compression::Codec::None) {
+              client->async_produce(options.topic, key_bytes, message_bytes,
+                                    [&](const boost::system::error_code& request_ec,
+                                        boltstream::protocol::Frame frame) {
+                                      if (request_ec) {
+                                        std::cerr << "boltstream-producer: request failed: "
+                                                  << request_ec.message() << '\n';
+                                        finish(1);
+                                        return;
+                                      }
+                                      finish(response_exit_code(frame));
+                                    });
+              return;
+            }
+            std::vector<boltstream::protocol::BatchRecord> records(options.batch_records,
+                                                                   {key_bytes, message_bytes});
+            const auto raw = boltstream::protocol::encode_record_set(records);
+            boltstream::protocol::ProduceBatchRequest request;
+            request.topic = options.topic;
+            request.partition = 0;
+            request.codec = options.compression;
+            request.record_count = options.batch_records;
+            request.uncompressed_bytes = static_cast<std::uint32_t>(raw.size());
+            request.encoded_records =
+                boltstream::compression::compress(options.compression, raw, options.zstd_level);
+            client->async_produce_batch(request, [&](const boost::system::error_code& request_ec,
+                                                     boltstream::protocol::Frame frame) {
+              if (request_ec) {
+                std::cerr << "boltstream-producer: request failed: " << request_ec.message()
+                          << '\n';
+                finish(1);
+                return;
+              }
+              finish(response_exit_code(frame));
+            });
+          };
+          const auto codecs = boltstream::compression::kNoneMask |
+                              (options.compression == boltstream::compression::Codec::Zstd
+                                   ? boltstream::compression::kZstdMask
+                                   : 0U);
+          client->async_metadata(
+              [&, send](const boost::system::error_code& metadata_ec,
+                        boltstream::protocol::Frame frame) mutable {
+                if (metadata_ec ||
+                    frame.header.frame_type != boltstream::protocol::FrameType::MetadataResponse) {
+                  finish(response_exit_code(frame));
                   return;
                 }
-                finish(response_exit_code(frame));
-              });
+                send();
+              },
+              codecs);
         };
 
         if (options.token.empty()) {

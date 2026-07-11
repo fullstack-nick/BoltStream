@@ -172,6 +172,20 @@ ParsedServerOptions parse_server_options(std::span<const std::string_view> args)
         return parsed;
       }
       parsed.options.max_frame_bytes = max_frame_bytes;
+    } else if (arg == "--max-produce-batch-records") {
+      std::uint32_t value{};
+      if (!parse_u32(require_value(arg), value) || value > 1024) {
+        parsed.error = "invalid --max-produce-batch-records value";
+        return parsed;
+      }
+      parsed.options.max_produce_batch_records = value;
+    } else if (arg == "--max-uncompressed-batch-bytes") {
+      std::uint32_t value{};
+      if (!parse_u32(require_value(arg), value)) {
+        parsed.error = "invalid --max-uncompressed-batch-bytes value";
+        return parsed;
+      }
+      parsed.options.max_uncompressed_batch_bytes = value;
     } else if (arg == "--max-fetch-records") {
       std::uint32_t max_fetch_records{};
       if (!parse_u32(require_value(arg), max_fetch_records)) {
@@ -310,7 +324,8 @@ std::string server_usage() {
   return "Usage: boltstream-server [--config PATH] [--check-config] "
          "[--print-effective-config] [--listen HOST:PORT] [--port PORT] "
          "[--admin-listen HOST:PORT] [--io-workers N] [--data PATH] "
-         "[--max-frame-bytes BYTES] "
+         "[--max-frame-bytes BYTES] [--max-produce-batch-records N] "
+         "[--max-uncompressed-batch-bytes BYTES] "
          "[--max-fetch-records N] [--max-fetch-bytes BYTES] "
          "[--max-topic-partitions N] [--max-fetch-wait-ms MS] "
          "[--max-append-queue-depth N] [--append-workers N] "
@@ -330,6 +345,8 @@ std::string server_usage() {
          "  --io-workers 1\n"
          "  --data ./data\n"
          "  --max-frame-bytes 1048576\n"
+         "  --max-produce-batch-records 1024\n"
+         "  --max-uncompressed-batch-bytes 1048576\n"
          "  --max-fetch-records 100\n"
          "  --max-fetch-bytes 1048576\n"
          "  --max-topic-partitions 128\n"

@@ -13,8 +13,8 @@
 
 namespace boltstream::observability {
 
-inline constexpr std::size_t kMetricFrameTypeCount = 38;
-inline constexpr std::size_t kMetricErrorCodeCount = 21;
+inline constexpr std::size_t kMetricFrameTypeCount = 40;
+inline constexpr std::size_t kMetricErrorCodeCount = 23;
 inline constexpr std::array<double, 16> kRequestDurationBuckets{
     0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,
     0.25,   0.5,   1.0,    2.5,   5.0,  10.0,  30.0, 60.0};
@@ -54,6 +54,11 @@ struct RegistrySnapshot {
   std::uint64_t records_produced{0};
   std::uint64_t records_fetched{0};
   std::uint64_t append_batches{0};
+  std::array<std::uint64_t, 2> compression_batches{};
+  std::array<std::uint64_t, 2> compression_logical_bytes{};
+  std::array<std::uint64_t, 2> compression_encoded_bytes{};
+  std::uint64_t compression_decode_failures{0};
+  std::uint64_t compressed_fetch_passthroughs{0};
   AppendBatchHistogramSnapshot append_batch_records;
   std::uint64_t group_rebalances{0};
   std::uint64_t group_heartbeat_failures{0};
@@ -129,6 +134,10 @@ public:
   void record_records_produced(std::uint64_t count);
   void record_records_fetched(std::uint64_t count);
   void record_append_batch(std::uint64_t records);
+  void record_compression_batch(compression::Codec codec, std::uint64_t logical_bytes,
+                                std::uint64_t encoded_bytes);
+  void record_compression_decode_failure();
+  void record_compressed_fetch_passthrough();
   void record_group_rebalance();
   void record_retention_run(std::uint64_t segments_deleted, std::uint64_t bytes_deleted);
   void record_retention_failure();
@@ -182,6 +191,11 @@ private:
   std::atomic<std::uint64_t> records_produced_{0};
   std::atomic<std::uint64_t> records_fetched_{0};
   std::atomic<std::uint64_t> append_batches_{0};
+  std::array<std::atomic<std::uint64_t>, 2> compression_batches_{};
+  std::array<std::atomic<std::uint64_t>, 2> compression_logical_bytes_{};
+  std::array<std::atomic<std::uint64_t>, 2> compression_encoded_bytes_{};
+  std::atomic<std::uint64_t> compression_decode_failures_{0};
+  std::atomic<std::uint64_t> compressed_fetch_passthroughs_{0};
   AppendBatchHistogram append_batch_records_;
   std::atomic<std::uint64_t> group_rebalances_{0};
   std::atomic<std::uint64_t> group_heartbeat_failures_{0};

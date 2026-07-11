@@ -252,6 +252,8 @@ public:
   explicit BrokerRuntime(ServerOptions options, std::string broker_token,
                          observability::MetricsRegistry& metrics)
       : data_dir_(std::move(options.data_dir)), max_frame_bytes_(options.max_frame_bytes),
+        max_produce_batch_records_(options.max_produce_batch_records),
+        max_uncompressed_batch_bytes_(options.max_uncompressed_batch_bytes),
         max_fetch_records_(options.max_fetch_records), max_fetch_bytes_(options.max_fetch_bytes),
         max_topic_partitions_(options.max_topic_partitions),
         max_fetch_wait_ms_(options.max_fetch_wait_ms),
@@ -470,6 +472,32 @@ public:
     }
   }
 
+  protocol::ProduceBatchResponse produce_batch(const protocol::ProduceBatchRequest& request,
+                                               std::span<const protocol::BatchRecord> records) {
+    auto topic = find_topic_or_throw(request.topic);
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
+    auto partition = partition_or_throw(*topic, request.partition);
+    std::vector<storage::AppendRecord> appends;
+    appends.reserve(records.size());
+    for (const auto& record : records) {
+      appends.push_back({record.key, record.message});
+    }
+    std::lock_guard log_lock{partition->log_mutex};
+    const auto metadata = partition->log.append_encoded_batch(
+        request.codec, request.encoded_records, request.uncompressed_bytes, appends);
+    metrics_.record_records_produced(metadata.record_count);
+    metrics_.record_append_batch(metadata.record_count);
+    metrics_.record_compression_batch(metadata.codec, metadata.logical_bytes,
+                                      metadata.encoded_bytes);
+    notify_fetch_waiters(request.topic, request.partition);
+    return {metadata.topic,         metadata.partition,    metadata.base_offset,
+            metadata.next_offset,   metadata.record_count, metadata.logical_bytes,
+            metadata.encoded_bytes, metadata.stored_bytes};
+  }
+
   protocol::FetchResponse fetch(const protocol::FetchRequest& request) const {
     auto topic = find_topic_or_throw(request.topic);
     std::lock_guard topic_lock{topic->mutex};
@@ -517,6 +545,26 @@ public:
       response.records.push_back(std::move(out));
     }
     return response;
+  }
+
+  std::optional<storage::EncodedBatch>
+  fetch_encoded_batch(const protocol::FetchRequest& request) const {
+    auto topic = find_topic_or_throw(request.topic);
+    std::lock_guard topic_lock{topic->mutex};
+    if (topic->deleting) {
+      throw BrokerRequestError{protocol::ErrorCode::UnknownTopic, "topic is being deleted"};
+    }
+    auto partition = partition_or_throw(*topic, request.partition);
+    std::lock_guard log_lock{partition->log_mutex};
+    const auto from_offset = resolve_fetch_offset(request, partition->log.earliest_offset(),
+                                                  partition->log.next_offset());
+    auto batch = partition->log.read_encoded_batch(from_offset);
+    if (!batch || batch->metadata.codec != compression::Codec::Zstd ||
+        batch->metadata.record_count > max_fetch_records_ ||
+        batch->metadata.encoded_bytes > max_fetch_bytes_) {
+      return std::nullopt;
+    }
+    return batch;
   }
 
   protocol::OffsetCommitResponse commit_offset(const protocol::OffsetCommitRequest& request) {
@@ -946,6 +994,12 @@ public:
   }
 
   [[nodiscard]] std::uint32_t max_frame_bytes() const { return max_frame_bytes_; }
+  [[nodiscard]] std::uint32_t max_produce_batch_records() const {
+    return max_produce_batch_records_;
+  }
+  [[nodiscard]] std::uint32_t max_uncompressed_batch_bytes() const {
+    return max_uncompressed_batch_bytes_;
+  }
   [[nodiscard]] std::uint32_t max_fetch_wait_ms() const { return max_fetch_wait_ms_; }
 
   std::optional<std::uint64_t> register_fetch_waiter(std::string topic, std::uint16_t partition,
@@ -1261,8 +1315,9 @@ private:
     topic->partition_count = partition_count;
     topic->partitions.reserve(partition_count);
     for (std::uint16_t partition = 0; partition < partition_count; ++partition) {
-      auto log = storage::PartitionLog::open(
-          {data_dir_, topic->name, partition, segment_bytes_, segment_max_age_seconds_});
+      auto log =
+          storage::PartitionLog::open({data_dir_, topic->name, partition, segment_bytes_,
+                                       segment_max_age_seconds_, max_uncompressed_batch_bytes_});
       topic->partitions.push_back(std::make_shared<TopicState::PartitionState>(std::move(log)));
     }
     return topic;
@@ -1461,6 +1516,8 @@ private:
 
   std::filesystem::path data_dir_;
   std::uint32_t max_frame_bytes_;
+  std::uint32_t max_produce_batch_records_;
+  std::uint32_t max_uncompressed_batch_bytes_;
   std::uint32_t max_fetch_records_;
   std::uint32_t max_fetch_bytes_;
   std::uint32_t max_topic_partitions_;
@@ -1593,6 +1650,15 @@ private:
             write_error(decoded.header.correlation_id, decoded.error, decoded.message, true);
             return;
           }
+          if (protocol_version_ == 0) {
+            protocol_version_ = decoded.header.version;
+          } else if (protocol_version_ != decoded.header.version) {
+            request_started_ = std::chrono::steady_clock::now();
+            request_frame_type_ = decoded.header.frame_type;
+            write_error(decoded.header.correlation_id, protocol::ErrorCode::UnsupportedVersion,
+                        "protocol version changed within one connection", true);
+            return;
+          }
           read_payload(decoded.header);
         }));
   }
@@ -1647,6 +1713,9 @@ private:
       return;
     case protocol::FrameType::ProduceRequest:
       handle_produce(std::move(frame));
+      return;
+    case protocol::FrameType::ProduceBatchRequest:
+      handle_produce_batch(std::move(frame));
       return;
     case protocol::FrameType::FetchRequest:
       handle_fetch(std::move(frame));
@@ -1740,7 +1809,10 @@ private:
   }
 
   void handle_metadata(protocol::Frame frame) {
-    const auto validation = protocol::validate_empty_payload(frame.payload);
+    std::uint32_t requested_codecs = compression::kNoneMask;
+    const auto validation = protocol_version_ >= 5
+                                ? protocol::decode_metadata_request(frame.payload, requested_codecs)
+                                : protocol::validate_empty_payload(frame.payload);
     if (!validation.ok) {
       write_error(frame.header.correlation_id, validation.error, validation.message, true);
       return;
@@ -1749,8 +1821,12 @@ private:
       return;
     }
 
-    const auto metadata = runtime_.metadata();
-    const auto payload = protocol::encode_metadata_response(metadata.topics);
+    auto metadata = runtime_.metadata();
+    negotiated_codecs_ = requested_codecs & compression::kSupportedCodecMask;
+    negotiated_codecs_ |= compression::kNoneMask;
+    metadata.supported_codecs = compression::kSupportedCodecMask;
+    metadata.negotiated_codecs = negotiated_codecs_;
+    const auto payload = protocol::encode_metadata_response(metadata, protocol_version_);
     write_frame(protocol::FrameType::MetadataResponse, frame.header.correlation_id, payload, false);
   }
 
@@ -1815,6 +1891,56 @@ private:
     }
   }
 
+  void handle_produce_batch(protocol::Frame frame) {
+    if (protocol_version_ < 5) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::UnsupportedRequest,
+                  "batch produce requires protocol version 5", true);
+      return;
+    }
+    protocol::ProduceBatchRequest request;
+    const auto decoded = protocol::decode_produce_batch_request(frame.payload, request);
+    if (!decoded.ok) {
+      write_error(frame.header.correlation_id, decoded.error, decoded.message, true);
+      return;
+    }
+    if (!require_auth(frame.header.correlation_id)) {
+      return;
+    }
+    const auto codec_mask = 1U << static_cast<unsigned>(request.codec);
+    if ((negotiated_codecs_ & codec_mask) == 0U) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::UnsupportedCodec,
+                  "compression codec was not negotiated", false);
+      return;
+    }
+    if (request.record_count > runtime_.max_produce_batch_records() ||
+        request.uncompressed_bytes > runtime_.max_uncompressed_batch_bytes()) {
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InvalidLength,
+                  "produce batch exceeds configured limits", false);
+      return;
+    }
+    try {
+      const auto raw = compression::decompress(request.codec, request.encoded_records,
+                                               request.uncompressed_bytes,
+                                               runtime_.max_uncompressed_batch_bytes());
+      std::vector<protocol::BatchRecord> records;
+      const auto batch = protocol::decode_record_set(raw, request.record_count, records);
+      if (!batch.ok) {
+        write_error(frame.header.correlation_id, batch.error, batch.message, true);
+        return;
+      }
+      const auto response = runtime_.produce_batch(request, records);
+      const auto payload = protocol::encode_produce_batch_response(response);
+      write_frame(protocol::FrameType::ProduceBatchResponse, frame.header.correlation_id, payload,
+                  false);
+    } catch (const BrokerRequestError& error) {
+      write_error(frame.header.correlation_id, error.code(), error.what(), false);
+    } catch (const std::exception& error) {
+      metrics_.record_compression_decode_failure();
+      write_error(frame.header.correlation_id, protocol::ErrorCode::InvalidBatch, error.what(),
+                  true);
+    }
+  }
+
   void handle_fetch(protocol::Frame frame) {
     protocol::FetchRequest request;
     const auto decoded = protocol::decode_fetch_request(frame.payload, request);
@@ -1844,6 +1970,20 @@ private:
 
   void fetch_or_wait(std::uint64_t correlation_id, protocol::FetchRequest request) {
     try {
+      if (protocol_version_ >= 5 && (negotiated_codecs_ & compression::kZstdMask) != 0U) {
+        if (const auto batch = runtime_.fetch_encoded_batch(request)) {
+          const auto payload = protocol::encode_compressed_fetch_response(
+              batch->metadata.topic, batch->metadata.partition, batch->metadata.base_offset,
+              batch->metadata.next_offset, batch->metadata.timestamp_unix_ns, batch->metadata.codec,
+              batch->metadata.record_count, batch->metadata.logical_bytes, batch->encoded_records);
+          if (payload.size() + protocol::kFrameHeaderBytes <= runtime_.max_frame_bytes()) {
+            metrics_.record_records_fetched(batch->metadata.record_count);
+            metrics_.record_compressed_fetch_passthrough();
+            write_frame(protocol::FrameType::FetchResponse, correlation_id, payload, false);
+            return;
+          }
+        }
+      }
       const auto response = runtime_.fetch(request);
       if (response.records.empty() && request.max_wait_ms > 0 &&
           response.from_offset == response.next_offset) {
@@ -2372,8 +2512,9 @@ private:
     }
 
     auto self = shared_from_this();
-    auto bytes = std::make_shared<std::vector<std::uint8_t>>(
-        protocol::encode_frame(frame_type, correlation_id, payload));
+    auto bytes = std::make_shared<std::vector<std::uint8_t>>(protocol::encode_frame(
+        protocol_version_ == 0 ? protocol::kProtocolVersion : protocol_version_, frame_type,
+        correlation_id, payload));
     metrics_.record_response(request_frame_type_, bytes->size(), request_duration_seconds());
     boost::asio::async_write(
         socket_, boost::asio::buffer(*bytes),
@@ -2427,6 +2568,8 @@ private:
   std::function<void()> on_close_;
   std::string remote_endpoint_;
   bool authenticated_{false};
+  std::uint16_t protocol_version_{0};
+  std::uint32_t negotiated_codecs_{compression::kNoneMask};
   std::optional<std::uint64_t> active_waiter_id_;
   std::chrono::steady_clock::time_point request_started_{};
   protocol::FrameType request_frame_type_{protocol::FrameType::ErrorResponse};

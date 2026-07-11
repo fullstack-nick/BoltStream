@@ -31,6 +31,7 @@ struct ConsumerOptions {
   std::uint32_t max_records{0};
   std::uint32_t idle_exit_ms{0};
   std::string token;
+  boltstream::compression::Codec compression{boltstream::compression::Codec::None};
   bool help_requested{false};
   bool from_seen{false};
   bool partition_seen{false};
@@ -45,6 +46,7 @@ void usage() {
                "[--from beginning|latest|committed|OFFSET] [--group GROUP]\n"
                "                           [--host HOST] [--port PORT] [--timeout-ms MS]\n"
                "                           [--wait-ms MS] [--commit] [--token TOKEN]\n"
+               "                           [--compression none|zstd]\n"
                "       boltstream-consumer --coordinated --topic TOPIC --group GROUP --commit\n"
                "                           [--session-timeout-ms MS] [--heartbeat-ms MS]\n"
                "                           [--poll-ms MS] [--max-records N] [--idle-exit-ms MS]\n"
@@ -155,6 +157,16 @@ ConsumerOptions parse_options(int argc, char** argv) {
       options.from_seen = true;
     } else if (arg == "--group") {
       options.group = std::string{require_value(arg)};
+    } else if (arg == "--compression") {
+      const auto value = require_value(arg);
+      if (value == "none") {
+        options.compression = boltstream::compression::Codec::None;
+      } else if (value == "zstd") {
+        options.compression = boltstream::compression::Codec::Zstd;
+      } else {
+        options.error = "--compression must be none or zstd";
+        return options;
+      }
     } else if (arg == "--partition") {
       if (!parse_partition(require_value(arg), options.partition)) {
         options.error = "invalid --partition value";
@@ -393,6 +405,23 @@ RequestResult request_once(const ConsumerOptions& options,
           finish_frame(std::move(frame));
         });
   };
+  auto negotiate_then_target = [&, client, send_target]() mutable {
+    const auto codecs = boltstream::compression::kNoneMask |
+                        (options.compression == boltstream::compression::Codec::Zstd
+                             ? boltstream::compression::kZstdMask
+                             : 0U);
+    client->async_metadata(
+        [&, send_target](const boost::system::error_code& metadata_ec,
+                         boltstream::protocol::Frame frame) mutable {
+          if (metadata_ec ||
+              frame.header.frame_type != boltstream::protocol::FrameType::MetadataResponse) {
+            finish_frame(std::move(frame));
+            return;
+          }
+          send_target();
+        },
+        codecs);
+  };
 
   timer.expires_after(std::chrono::milliseconds(options.timeout_ms));
   timer.async_wait([&](const boost::system::error_code& ec) {
@@ -409,13 +438,13 @@ RequestResult request_once(const ConsumerOptions& options,
         }
 
         if (options.token.empty()) {
-          send_target();
+          negotiate_then_target();
           return;
         }
 
         client->async_auth(
-            options.token, [&, send_target](const boost::system::error_code& auth_ec,
-                                            boltstream::protocol::Frame frame) mutable {
+            options.token, [&, negotiate_then_target](const boost::system::error_code& auth_ec,
+                                                      boltstream::protocol::Frame frame) mutable {
               if (auth_ec) {
                 finish_error("auth failed: " + auth_ec.message());
                 return;
@@ -428,7 +457,7 @@ RequestResult request_once(const ConsumerOptions& options,
                 finish_error("malformed auth response");
                 return;
               }
-              send_target();
+              negotiate_then_target();
             });
       });
 
@@ -853,15 +882,32 @@ int main(int argc, char** argv) {
                     });
               });
         };
+        auto negotiate_then_fetch = [&, client, send_fetch]() mutable {
+          const auto codecs = boltstream::compression::kNoneMask |
+                              (options.compression == boltstream::compression::Codec::Zstd
+                                   ? boltstream::compression::kZstdMask
+                                   : 0U);
+          client->async_metadata(
+              [&, send_fetch](const boost::system::error_code& metadata_ec,
+                              boltstream::protocol::Frame frame) mutable {
+                if (metadata_ec ||
+                    frame.header.frame_type != boltstream::protocol::FrameType::MetadataResponse) {
+                  finish(response_exit_code(frame));
+                  return;
+                }
+                send_fetch();
+              },
+              codecs);
+        };
 
         if (options.token.empty()) {
-          send_fetch();
+          negotiate_then_fetch();
           return;
         }
 
         client->async_auth(
-            options.token, [&, send_fetch](const boost::system::error_code& auth_ec,
-                                           boltstream::protocol::Frame frame) mutable {
+            options.token, [&, negotiate_then_fetch](const boost::system::error_code& auth_ec,
+                                                     boltstream::protocol::Frame frame) mutable {
               if (auth_ec) {
                 std::cerr << "boltstream-consumer: auth failed: " << auth_ec.message() << '\n';
                 finish(1);
@@ -876,7 +922,7 @@ int main(int argc, char** argv) {
                 finish(1);
                 return;
               }
-              send_fetch();
+              negotiate_then_fetch();
             });
       });
   io.run();

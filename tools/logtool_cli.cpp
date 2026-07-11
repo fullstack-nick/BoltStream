@@ -33,7 +33,9 @@ void usage() {
                "  boltstream-logtool read --data PATH --topic TOPIC --from OFFSET --max-records N\n"
                "                          [--segment-bytes BYTES] [--partition N]\n"
                "  boltstream-logtool recover --data PATH --topic TOPIC\n"
-               "                             [--segment-bytes BYTES] [--partition N]\n";
+               "                             [--segment-bytes BYTES] [--partition N]\n"
+               "  boltstream-logtool inspect-batch --data PATH --topic TOPIC --from OFFSET\n"
+               "                                  [--partition N]\n";
 }
 
 template <typename UInt> bool parse_uint(std::string_view text, UInt& value) {
@@ -60,7 +62,8 @@ Options parse_options(int argc, char** argv) {
     options.help_requested = true;
     return options;
   }
-  if (options.command != "append" && options.command != "read" && options.command != "recover") {
+  if (options.command != "append" && options.command != "read" && options.command != "recover" &&
+      options.command != "inspect-batch") {
     options.error = "unknown command: " + options.command;
     return options;
   }
@@ -218,6 +221,29 @@ int run_recover(const Options& options) {
   return 0;
 }
 
+int run_inspect_batch(const Options& options) {
+  auto log = open_log(options);
+  const auto batch = log.read_encoded_batch(options.from);
+  if (!batch) {
+    std::cerr << "boltstream-logtool: offset is not the base of a storage batch\n";
+    return 1;
+  }
+  const auto& metadata = batch->metadata;
+  const auto ratio = metadata.logical_bytes == 0 ? 0.0
+                                                 : static_cast<double>(metadata.encoded_bytes) /
+                                                       static_cast<double>(metadata.logical_bytes);
+  std::cout << "{\"status\":\"ok\",\"topic\":\"" << json_escape(metadata.topic)
+            << "\",\"partition\":" << metadata.partition
+            << ",\"base_offset\":" << metadata.base_offset
+            << ",\"next_offset\":" << metadata.next_offset << ",\"codec\":\""
+            << boltstream::compression::codec_name(metadata.codec)
+            << "\",\"record_count\":" << metadata.record_count
+            << ",\"logical_bytes\":" << metadata.logical_bytes
+            << ",\"encoded_bytes\":" << metadata.encoded_bytes
+            << ",\"stored_bytes\":" << metadata.stored_bytes << ",\"ratio\":" << ratio << "}\n";
+  return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -241,6 +267,9 @@ int main(int argc, char** argv) {
     }
     if (options.command == "recover") {
       return run_recover(options);
+    }
+    if (options.command == "inspect-batch") {
+      return run_inspect_batch(options);
     }
   } catch (const std::exception& error) {
     std::cerr << "boltstream-logtool: " << error.what() << '\n';
