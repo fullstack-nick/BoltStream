@@ -492,6 +492,17 @@ public:
     metrics_.record_append_batch(metadata.record_count);
     metrics_.record_compression_batch(metadata.codec, metadata.logical_bytes,
                                       metadata.encoded_bytes);
+    StructuredLogFields stored{"info", "compression_batch_stored"};
+    stored.component = "storage";
+    stored.string_fields["topic"] = metadata.topic;
+    stored.string_fields["codec"] = std::string{compression::codec_name(metadata.codec)};
+    stored.numeric_fields["partition"] = metadata.partition;
+    stored.numeric_fields["base_offset"] = metadata.base_offset;
+    stored.numeric_fields["record_count"] = metadata.record_count;
+    stored.numeric_fields["logical_bytes"] = metadata.logical_bytes;
+    stored.numeric_fields["encoded_bytes"] = metadata.encoded_bytes;
+    stored.numeric_fields["stored_bytes"] = metadata.stored_bytes;
+    write_structured_log(stored);
     notify_fetch_waiters(request.topic, request.partition);
     return {metadata.topic,         metadata.partition,    metadata.base_offset,
             metadata.next_offset,   metadata.record_count, metadata.logical_bytes,
@@ -1979,6 +1990,18 @@ private:
           if (payload.size() + protocol::kFrameHeaderBytes <= runtime_.max_frame_bytes()) {
             metrics_.record_records_fetched(batch->metadata.record_count);
             metrics_.record_compressed_fetch_passthrough();
+            StructuredLogFields forwarded{"info", "compressed_fetch_passthrough"};
+            forwarded.component = "broker";
+            forwarded.correlation_id = correlation_id;
+            forwarded.string_fields["topic"] = batch->metadata.topic;
+            forwarded.string_fields["codec"] =
+                std::string{compression::codec_name(batch->metadata.codec)};
+            forwarded.numeric_fields["partition"] = batch->metadata.partition;
+            forwarded.numeric_fields["base_offset"] = batch->metadata.base_offset;
+            forwarded.numeric_fields["record_count"] = batch->metadata.record_count;
+            forwarded.numeric_fields["logical_bytes"] = batch->metadata.logical_bytes;
+            forwarded.numeric_fields["encoded_bytes"] = batch->metadata.encoded_bytes;
+            write_structured_log(forwarded);
             write_frame(protocol::FrameType::FetchResponse, correlation_id, payload, false);
             return;
           }

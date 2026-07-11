@@ -69,6 +69,9 @@ struct Options {
   std::uint32_t repetitions{1};
   std::uint32_t timeout_ms{30000};
   std::uint32_t preload_batch_records{1024};
+  boltstream::compression::Codec compression{boltstream::compression::Codec::None};
+  std::uint32_t batch_records{1};
+  int zstd_level{3};
   bool skip_preload{false};
   std::uint32_t server_io_workers{0};
   std::uint32_t server_append_workers{0};
@@ -110,6 +113,7 @@ void usage() {
          "N]\n"
          "      [--duration-seconds N] [--warmup-seconds N] [--messages N]\n"
          "      [--warmup-messages N] [--payload-bytes N] [--key-bytes N]\n"
+         "      [--compression none|zstd] [--batch-records N] [--zstd-level 1..19]\n"
          "      [--repetitions N] [--timeout-ms N] [--json-out PATH]\n"
          "      [--markdown-out PATH] [--server-io-workers N]\n"
          "      [--server-append-workers N] [--server-append-batch-records N]\n"
@@ -255,7 +259,7 @@ std::uint64_t memory_bytes() {
 class ProtocolClient {
 public:
   ProtocolClient(std::string host, std::uint16_t port, std::string_view token,
-                 std::uint32_t timeout_ms)
+                 std::uint32_t timeout_ms, boltstream::compression::Codec codec)
       : socket_(io_) {
     boost::asio::ip::tcp::resolver resolver{io_};
     const auto endpoints = resolver.resolve(host, std::to_string(port));
@@ -280,6 +284,17 @@ public:
       if (!decoded.ok || (response.status != "authenticated" && response.status != "disabled")) {
         throw std::runtime_error("broker authentication failed");
       }
+    }
+    const auto codecs =
+        boltstream::compression::kNoneMask |
+        (codec == boltstream::compression::Codec::Zstd ? boltstream::compression::kZstdMask : 0U);
+    const auto metadata = request(boltstream::protocol::FrameType::MetadataRequest,
+                                  boltstream::protocol::encode_metadata_request(codecs));
+    boltstream::protocol::MetadataResponse metadata_response;
+    const auto decoded =
+        boltstream::protocol::decode_metadata_response(metadata.payload, metadata_response, 5);
+    if (!decoded.ok || (metadata_response.negotiated_codecs & codecs) != codecs) {
+      throw std::runtime_error("broker compression negotiation failed");
     }
   }
 
@@ -322,9 +337,40 @@ private:
   std::uint64_t next_correlation_id_{1};
 };
 
-boltstream::protocol::ProduceResponse produce(ProtocolClient& client, std::string_view topic,
-                                              const std::vector<std::uint8_t>& key,
-                                              const std::vector<std::uint8_t>& value) {
+struct ProduceOutcome {
+  std::uint16_t partition{0};
+  std::uint32_t records{0};
+  std::uint32_t bytes{0};
+};
+
+std::uint16_t key_partition(std::span<const std::uint8_t> key, std::uint16_t partitions);
+
+ProduceOutcome produce(const Options& options, ProtocolClient& client, std::string_view topic,
+                       const std::vector<std::uint8_t>& key,
+                       const std::vector<std::uint8_t>& value) {
+  if (options.batch_records > 1 || options.compression != boltstream::compression::Codec::None) {
+    const std::vector<boltstream::protocol::BatchRecord> records(options.batch_records,
+                                                                 {key, value});
+    const auto raw = boltstream::protocol::encode_record_set(records);
+    boltstream::protocol::ProduceBatchRequest request;
+    request.topic = std::string{topic};
+    request.partition = key_partition(key, static_cast<std::uint16_t>(options.partitions));
+    request.codec = options.compression;
+    request.record_count = options.batch_records;
+    request.uncompressed_bytes = static_cast<std::uint32_t>(raw.size());
+    request.encoded_records =
+        boltstream::compression::compress(options.compression, raw, options.zstd_level);
+    const auto frame = client.request(boltstream::protocol::FrameType::ProduceBatchRequest,
+                                      boltstream::protocol::encode_produce_batch_request(request));
+    boltstream::protocol::ProduceBatchResponse response;
+    const auto decoded =
+        boltstream::protocol::decode_produce_batch_response(frame.payload, response);
+    if (!decoded.ok ||
+        frame.header.frame_type != boltstream::protocol::FrameType::ProduceBatchResponse) {
+      throw std::runtime_error("malformed produce-batch response");
+    }
+    return {response.partition, response.record_count, response.encoded_bytes};
+  }
   const auto frame =
       client.request(boltstream::protocol::FrameType::ProduceRequest,
                      boltstream::protocol::encode_produce_request(topic, key, value));
@@ -336,11 +382,12 @@ boltstream::protocol::ProduceResponse produce(ProtocolClient& client, std::strin
   if (!decoded.ok) {
     throw std::runtime_error("malformed produce response: " + decoded.message);
   }
-  return response;
+  return {response.partition, 1, response.encoded_byte_size};
 }
 
 void create_topic(const Options& options, std::string_view topic) {
-  ProtocolClient client{options.host, options.port, options.token, options.timeout_ms};
+  ProtocolClient client{options.host, options.port, options.token, options.timeout_ms,
+                        options.compression};
   const auto frame = client.request(boltstream::protocol::FrameType::CreateTopicRequest,
                                     boltstream::protocol::encode_create_topic_request(
                                         topic, static_cast<std::uint16_t>(options.partitions)));
@@ -350,7 +397,8 @@ void create_topic(const Options& options, std::string_view topic) {
 }
 
 void delete_topic(const Options& options, std::string_view topic) {
-  ProtocolClient client{options.host, options.port, options.token, options.timeout_ms};
+  ProtocolClient client{options.host, options.port, options.token, options.timeout_ms,
+                        options.compression};
   boltstream::protocol::DeleteTopicRequest request;
   request.topic = std::string{topic};
   const auto frame = client.request(boltstream::protocol::FrameType::DeleteTopicRequest,
@@ -460,7 +508,7 @@ Sample run_produce_throughput(const Options& options, std::string_view topic) {
   clients.reserve(options.clients);
   for (std::uint32_t index = 0; index < options.clients; ++index) {
     clients.push_back(std::make_unique<ProtocolClient>(options.host, options.port, options.token,
-                                                       options.timeout_ms));
+                                                       options.timeout_ms, options.compression));
   }
 
   std::vector<ThreadResult> results(options.clients);
@@ -482,12 +530,12 @@ Sample run_produce_throughput(const Options& options, std::string_view topic) {
       start.wait(false);
       try {
         while (Clock::now() < warmup_end) {
-          (void)produce(*clients[index], topic, key, message);
+          (void)produce(options, *clients[index], topic, key, message);
         }
         while (Clock::now() < measure_end) {
-          const auto response = produce(*clients[index], topic, key, message);
-          ++result.records;
-          result.bytes += response.encoded_byte_size;
+          const auto response = produce(options, *clients[index], topic, key, message);
+          result.records += response.records;
+          result.bytes += response.bytes;
         }
       } catch (const std::exception& error) {
         ++result.errors;
@@ -515,7 +563,7 @@ Sample run_fixed_produce(const Options& options, std::string_view topic, std::ui
   clients.reserve(options.clients);
   for (std::uint32_t index = 0; index < options.clients; ++index) {
     clients.push_back(std::make_unique<ProtocolClient>(options.host, options.port, options.token,
-                                                       options.timeout_ms));
+                                                       options.timeout_ms, options.compression));
   }
 
   std::vector<ThreadResult> results(options.clients);
@@ -542,27 +590,27 @@ Sample run_fixed_produce(const Options& options, std::string_view topic, std::ui
       ready.count_down();
       start_warmup.wait(false);
       try {
-        while (warmup_sequence.fetch_add(1) < warmup_messages) {
-          (void)produce(*clients[index], topic, key, message);
+        while (warmup_sequence.fetch_add(options.batch_records) < warmup_messages) {
+          (void)produce(options, *clients[index], topic, key, message);
         }
         warmed.count_down();
         warmed_signaled = true;
         start_measure.wait(false);
         for (;;) {
-          const auto current = sequence.fetch_add(1);
+          const auto current = sequence.fetch_add(options.batch_records);
           if (current >= messages) {
             break;
           }
           const auto started = Clock::now();
-          const auto response = produce(*clients[index], topic, key, message);
+          const auto response = produce(options, *clients[index], topic, key, message);
           if (collect_latency) {
             result.latencies_ns.push_back(static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started)
                     .count()));
           }
-          ++result.records;
-          result.bytes += response.encoded_byte_size;
-          ++result.partitions[response.partition];
+          result.records += response.records;
+          result.bytes += response.bytes;
+          result.partitions[response.partition] += response.records;
         }
       } catch (const std::exception& error) {
         ++result.errors;
@@ -616,7 +664,7 @@ Sample run_fetch_throughput(const Options& options, std::string_view topic) {
   clients.reserve(options.partitions);
   for (std::uint32_t partition = 0; partition < options.partitions; ++partition) {
     clients.push_back(std::make_unique<ProtocolClient>(options.host, options.port, options.token,
-                                                       options.timeout_ms));
+                                                       options.timeout_ms, options.compression));
   }
   std::vector<ThreadResult> results(options.partitions);
   std::vector<std::thread> threads;
@@ -744,7 +792,9 @@ std::string render_json(const Options& options, const std::vector<Sample>& sampl
 
   std::ostringstream out;
   out << std::fixed << std::setprecision(3);
-  out << "{\n  \"schema_version\":1,\n";
+  const auto compression_mode =
+      options.batch_records > 1 || options.compression != boltstream::compression::Codec::None;
+  out << "{\n  \"schema_version\":" << (compression_mode ? 2 : 1) << ",\n";
   out << "  \"generated_at_utc\":\"" << utc_now() << "\",\n";
   out << "  \"environment\":{\"kind\":\"" << json_escape(options.environment)
       << "\",\"machine_type\":\"" << json_escape(options.machine_type) << "\",\"cpu_model\":\""
@@ -762,6 +812,10 @@ std::string render_json(const Options& options, const std::vector<Sample>& sampl
       << ",\"append_queue_depth\":" << options.server_queue_depth
       << ",\"durability\":\"flush\",\"metrics_enabled\":true,\"log_level\":\""
       << json_escape(options.server_log_level) << "\"},\n";
+  out << "  \"compression\":{\"codec\":\""
+      << boltstream::compression::codec_name(options.compression)
+      << "\",\"batch_records\":" << options.batch_records
+      << ",\"zstd_level\":" << options.zstd_level << "},\n";
   out << "  \"workload\":{\"name\":\"" << json_escape(options.workload)
       << "\",\"partitions\":" << options.partitions << ",\"clients\":" << options.clients
       << ",\"duration_seconds\":" << options.duration_seconds
@@ -909,6 +963,24 @@ Options parse_options(int argc, char** argv) {
       u32(options.timeout_ms);
     } else if (arg == "--preload-batch-records") {
       u32(options.preload_batch_records);
+    } else if (arg == "--batch-records") {
+      u32(options.batch_records);
+    } else if (arg == "--zstd-level") {
+      std::uint32_t level = 0;
+      u32(level);
+      if (level < 1 || level > 19) {
+        throw std::invalid_argument("--zstd-level must be between 1 and 19");
+      }
+      options.zstd_level = static_cast<int>(level);
+    } else if (arg == "--compression") {
+      const auto codec = value();
+      if (codec == "none") {
+        options.compression = boltstream::compression::Codec::None;
+      } else if (codec == "zstd") {
+        options.compression = boltstream::compression::Codec::Zstd;
+      } else {
+        throw std::invalid_argument("--compression must be none or zstd");
+      }
     } else if (arg == "--skip-preload") {
       options.skip_preload = true;
     } else if (arg == "--server-io-workers") {
@@ -941,6 +1013,13 @@ Options parse_options(int argc, char** argv) {
   }
   if (options.preload_batch_records == 0 || options.preload_batch_records > 1024) {
     throw std::invalid_argument("--preload-batch-records must be between 1 and 1024");
+  }
+  if (options.batch_records == 0 || options.batch_records > 1024) {
+    throw std::invalid_argument("--batch-records must be between 1 and 1024");
+  }
+  if (options.batch_records > 1 && ((options.messages % options.batch_records) != 0 ||
+                                    (options.warmup_messages % options.batch_records) != 0)) {
+    throw std::invalid_argument("messages and warmup messages must be divisible by batch records");
   }
   if (options.skip_preload && (options.workload != "fetch-throughput" || options.topic.empty())) {
     throw std::invalid_argument("--skip-preload requires fetch-throughput and --topic");
