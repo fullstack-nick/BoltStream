@@ -1283,19 +1283,66 @@ live GCP proof path.
 
 ### Phase 12: Replication Simulation
 
-Deliverables:
+#### Locked Boundary
 
-- Local multi-broker mode.
-- Partition leader/follower assignment.
-- Follower replication fetch loop.
-- Replication lag metric.
-- `replication=leader` and `replication=all` produce modes.
+- Preserve public protocol version `5` and storage format `3`. Phase 12 is a
+  deterministic local replication simulator over real `PartitionLog` instances; it
+  does not add discovery, elections, leader promotion, quorum membership, remote
+  administration, or a new public listener.
+- A simulated cluster has one static leader and one static follower for each assigned
+  topic-partition. Broker ids and assignments are explicit and immutable for the run.
+- Replication copies the Phase 11 canonical encoded batch payload when the follower is
+  aligned to a stored batch boundary. Legacy records use the ordinary record path.
+  The follower must never invent offsets, skip records, or partially apply a batch.
+- `replication=leader` acknowledges after the leader append. `replication=all`
+  acknowledges only after every configured follower reaches the produced next offset;
+  an unavailable follower produces an explicit timeout while the leader append remains
+  durable. This is acknowledgement simulation, not a claim of consensus durability.
 
-Acceptance:
+#### Runtime, Metrics, and Tooling
 
-- A follower catches up from a leader.
-- Produce acknowledgements respect replication mode.
-- Restarted follower resumes from its last replicated offset.
+- Add a reusable `ReplicationSimulation` component with static partition metadata,
+  leader/follower watermarks, one-step and catch-up follower fetch operations, follower
+  availability controls, and restart-safe reopening of the follower log.
+- Add `boltstream-replication-sim`, which creates isolated leader/follower broker data
+  directories, produces deterministic `none` or `zstd` batches, demonstrates both
+  acknowledgement modes, catches the follower up, reopens it, and prints a stable JSON
+  summary.
+- Expose bounded Prometheus text for
+  `boltstream_replication_leader_next_offset`,
+  `boltstream_replication_follower_next_offset`,
+  `boltstream_replication_lag_records`, and
+  `boltstream_replication_follower_available`, labeled only by broker id, topic, and
+  partition.
+- `scripts/smoke-phase12.ps1` runs the packaged simulator's combined catch-up,
+  restart-resume, and offline-follower scenario, proving leader ack succeeds and
+  all-replica ack times out without losing the leader append.
+
+#### Verification and Live Proof
+
+1. Unit-test static assignment metadata, empty/already-current fetches, multi-batch
+   catch-up, exact key/value/codec payloads, lag transitions, acknowledgement semantics,
+   unavailable followers, divergent-offset rejection, and follower reopen/resume.
+2. Run Linux Debug/Release, Windows MSVC, formatting, warnings-as-errors, all earlier
+   phase smokes, and the Phase 12 smoke in CI.
+3. Push the exact implementation, require green CI, package the simulator with the
+   normal release artifact, and deploy that artifact to the existing GCP VM.
+4. Run the simulator on loopback with isolated `/var/lib/boltstream/phase12-*` state;
+   capture JSON, metrics, leader/follower files, timeout behavior, restart/resume, exact
+   `/version`, service health, cleanup, disk headroom, and a clean Terraform plan in
+   `proof/phase-12.md`. The normal single-broker service remains unchanged.
+
+#### Acceptance
+
+- A follower moves from positive lag to zero and its logical records exactly match the
+  leader, including zstd batches copied without recompression.
+- Leader acknowledgement succeeds while the follower is unavailable; all-replica
+  acknowledgement succeeds only at zero lag and otherwise returns the documented
+  timeout with the leader offset still advanced.
+- After its object/process is destroyed and reopened from the same data directory, the
+  follower resumes at its recovered next offset and copies only the missing suffix.
+- Local, CI, packaged-artifact, isolated live GCP, cleanup, and drift evidence are
+  durable before Phase 12 is called complete.
 
 ### Phase 13: Crash Recovery Proof
 

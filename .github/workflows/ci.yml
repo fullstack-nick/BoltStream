@@ -63,6 +63,10 @@ jobs:
         if: matrix.build_type == 'Debug'
         run: pwsh ./scripts/smoke-phase11.ps1 -Preset linux-gcc-debug -SkipBuild
 
+      - name: Phase 12 replication simulation smoke
+        if: matrix.build_type == 'Debug'
+        run: pwsh ./scripts/smoke-phase12.ps1 -BuildDir build/linux-gcc-debug -SkipBuild
+
       - name: Verify Phase 10 benchmark publication
         if: matrix.build_type == 'Debug'
         run: pwsh ./scripts/render-benchmarks.ps1 -InputDir benchmarks/results/raw/gcp -Check
@@ -125,6 +129,10 @@ jobs:
       - name: Phase 11 compression smoke
         shell: pwsh
         run: ./scripts/smoke-phase11.ps1 -Preset windows-msvc-debug -SkipBuild
+
+      - name: Phase 12 replication simulation smoke
+        shell: pwsh
+        run: ./scripts/smoke-phase12.ps1 -BuildDir build/windows-msvc-debug -SkipBuild
 
       - name: Verify Phase 10 Windows benchmark publication
         shell: pwsh

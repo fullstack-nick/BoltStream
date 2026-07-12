@@ -2,11 +2,28 @@
 
 BoltStream is a C++20 low-latency event streaming engine: a Kafka-inspired broker built from scratch to demonstrate Linux networking, durable storage, concurrency, testing, performance measurement, and cloud-native deployment.
 
-Phase 11 adds protocol-v5 `none`/`zstd` capability negotiation, producer-compressed
+Phase 12 adds a deterministic two-broker leader/follower replication simulator with
+restart-safe catch-up, leader/all acknowledgement modes, and replication lag metrics.
+Phase 11 added protocol-v5 `none`/`zstd` capability negotiation, producer-compressed
 record batches, mixed-format durable recovery, and zero-recompression compressed
 fetch pass-through while retaining protocol-v4 and storage-v2 readability.
 
-## Current Phase 11 Surface
+## Current Phase 12 Surface
+
+The public broker remains protocol v5/storage v3. Phase 12 adds the packaged
+`boltstream-replication-sim` executable for an isolated static leader/follower pair.
+It copies canonical stored batches, reports bounded Prometheus lag/watermark metrics,
+supports leader/all acknowledgement simulation, and resumes from the follower's
+recovered offset after reopen. It deliberately does not claim elections, failover, or
+distributed consensus.
+
+Run the local proof with:
+
+```powershell
+./scripts/smoke-phase12.ps1 -BuildDir build
+```
+
+## Phase 11 Compression Surface
 
 - `boltstream-server` opens broker TCP port `9000`.
 - Admin HTTP listens on `127.0.0.1:9100`.
