@@ -380,8 +380,8 @@ $MarkdownLines += @(
 )
 $MarkdownText = ($MarkdownLines -join "`n")
 
-$HeadlineStart = "<!-- PHASE10_BENCHMARK_START -->"
-$HeadlineEnd = "<!-- PHASE10_BENCHMARK_END -->"
+$HeadlineStart = "<!-- BENCHMARK_RESULTS_START -->"
+$HeadlineEnd = "<!-- BENCHMARK_RESULTS_END -->"
 $ReadmeText = Get-Content $Readme -Raw
 $StartIndex = $ReadmeText.IndexOf($HeadlineStart)
 $EndIndex = $ReadmeText.IndexOf($HeadlineEnd)

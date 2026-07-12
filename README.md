@@ -145,16 +145,19 @@ under `deployments/grafana/`. The complete metric contract is documented in
 
 ## Measured Performance
 
-These are limited `e2-micro` results for commit `14d225abe1d5`, based on two complete
-rounds for every profile and a third round for single-threaded and batched writes. They
-show the effect of batching on this constrained VM; they are not general capacity
-claims.
+<!-- BENCHMARK_RESULTS_START -->
 
-| Profile | Median records/s | Min | Max | CV | Median MiB/s | p50 (us) | p95 (us) | p99 (us) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| single-threaded | 104 | 71 | 125 | 27.13% | 0.031 | 258644.424 | 741374.534 | 753321.145 |
-| worker-event-loops | 92 | 67 | 117 | 38.39% | 0.028 | 391006.978 | 746455.544 | 756699.619 |
-| batched-writes | 180 | 171 | 191 | 5.46% | 0.054 | 12962.789 | 239372.586 | 243553.735 |
+Limited GCP `e2-micro` results for exact commit `14d225abe1d5` (two complete rounds for all profiles; a third for single-threaded and batched-writes). Measured recommendation: **batched-writes**.
+
+| Profile | Median records/s | Min | Max | CV | Median MiB/s | p50 (us) | p95 (us) | p99 (us) | max (us) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| single-threaded | 104 | 71 | 125 | 27.13% | 0.031 | 258644.424 | 741374.534 | 753321.145 | 1992654.750 |
+| worker-event-loops | 92 | 67 | 117 | 38.39% | 0.028 | 391006.978 | 746455.544 | 756699.619 | 1492236.219 |
+| batched-writes | 180 | 171 | 191 | 5.46% | 0.054 | 12962.789 | 239372.586 | 243553.735 | 970660.144 |
+
+See [docs/benchmarks.md](docs/benchmarks.md) for methodology, fetch results, dispersion, and the canonical JSON.
+
+<!-- BENCHMARK_RESULTS_END -->
 
 Reproduce a short local run, or execute the full controlled workload:
 
@@ -163,9 +166,8 @@ Reproduce a short local run, or execute the full controlled workload:
 .\scripts\bench.ps1 -Preset windows-msvc-release
 ```
 
-Methodology, fetch results, raw-data locations, and publication rules are in the
-[benchmark report](docs/benchmarks.md). Compression size evidence is documented
-separately in [compression benchmarks](docs/compression-benchmarks.md).
+Compression size evidence is documented separately in
+[compression benchmarks](docs/compression-benchmarks.md).
 
 ## Crash Recovery Proof
 
