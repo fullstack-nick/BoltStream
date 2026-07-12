@@ -3,6 +3,8 @@
 .vs/
 .vscode/
 build/
+__pycache__/
+*.py[cod]
 out/
 dist/
 artifacts/
