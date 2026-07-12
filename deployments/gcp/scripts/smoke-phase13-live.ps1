@@ -30,8 +30,8 @@ test -x "`$BINARY"
 VERSION="`$(curl -fsS http://127.0.0.1:9100/version)"
 echo "version: `$VERSION"
 grep -F "\"git_sha\":\"`$EXPECTED_SHA\"" <<<"`$VERSION" >/dev/null
-grep -F '"protocol_version":5' <<<"`$VERSION" >/dev/null
-grep -F '"storage_format_version":3' <<<"`$VERSION" >/dev/null
+grep -F '"protocol_version":"5"' <<<"`$VERSION" >/dev/null
+grep -F '"storage_format_version":"3"' <<<"`$VERSION" >/dev/null
 
 sudo rm -rf "`$ROOT"
 sudo install -d -o boltstream -g boltstream -m 0750 "`$ROOT"
@@ -72,8 +72,8 @@ try {
 
   $Output = & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no `
     --project $ProjectId --zone $Zone --command "bash $RemoteScript"
-  if ($LASTEXITCODE -ne 0) { throw "Phase 13 live smoke failed on $InstanceName." }
   $Output
+  if ($LASTEXITCODE -ne 0) { throw "Phase 13 live smoke failed on $InstanceName." }
 } finally {
   & $Gcloud compute ssh $InstanceName --strict-host-key-checking=no `
     --project $ProjectId --zone $Zone `
