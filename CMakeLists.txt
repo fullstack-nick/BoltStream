@@ -125,6 +125,7 @@ add_library(boltstream_core
   src/observability/logger.cpp
   src/observability/metrics.cpp
   src/protocol/protocol.cpp
+  src/recovery/proof.cpp
   src/replication/simulation.cpp
   src/storage/offset_store.cpp
   src/storage/partition_log.cpp)
@@ -166,6 +167,9 @@ target_link_libraries(boltstream-admin PRIVATE boltstream_core boltstream_warnin
 add_executable(boltstream-replication-sim tools/replication_sim_cli.cpp)
 target_link_libraries(boltstream-replication-sim PRIVATE boltstream_core boltstream_warnings)
 
+add_executable(boltstream-recovery-proof tools/recovery_proof_cli.cpp)
+target_link_libraries(boltstream-recovery-proof PRIVATE boltstream_core boltstream_warnings)
+
 install(TARGETS
   boltstream-server
   boltstream-producer
@@ -173,6 +177,7 @@ install(TARGETS
   boltstream-bench
   boltstream-admin
   boltstream-replication-sim
+  boltstream-recovery-proof
   boltstream-logtool
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
@@ -198,6 +203,7 @@ if(BOLTSTREAM_BUILD_TESTS AND BUILD_TESTING)
     tests/metrics_tests.cpp
     tests/options_tests.cpp
     tests/protocol_tests.cpp
+    tests/recovery_proof_tests.cpp
     tests/replication_simulation_tests.cpp
     tests/storage_tests.cpp)
   target_link_libraries(boltstream_tests PRIVATE boltstream_core GTest::gtest_main boltstream_warnings)

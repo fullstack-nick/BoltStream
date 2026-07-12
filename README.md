@@ -2,13 +2,34 @@
 
 BoltStream is a C++20 low-latency event streaming engine: a Kafka-inspired broker built from scratch to demonstrate Linux networking, durable storage, concurrency, testing, performance measurement, and cloud-native deployment.
 
-Phase 12 adds a deterministic two-broker leader/follower replication simulator with
+Phase 13 adds deterministic process-crash proof for torn records, partial compressed
+batches, and stale indexes. Phase 12 added a two-broker leader/follower simulator with
 restart-safe catch-up, leader/all acknowledgement modes, and replication lag metrics.
 Phase 11 added protocol-v5 `none`/`zstd` capability negotiation, producer-compressed
 record batches, mixed-format durable recovery, and zero-recompression compressed
 fetch pass-through while retaining protocol-v4 and storage-v2 readability.
 
-## Current Phase 12 Surface
+## Current Phase 13 Surface
+
+The public broker remains protocol v5/storage v3. The packaged
+`boltstream-recovery-proof` executable starts a worker process for each fault point,
+writes three flushed committed records, injects an incomplete log or index mutation,
+and terminates the worker with `_Exit`. The parent requires the abnormal exit, reopens
+the partition, and proves exact logical records, offsets, tail truncation, and canonical
+index rebuild.
+
+Run the complete local crash proof from a clean checkout with:
+
+```powershell
+./scripts/smoke-phase13.ps1
+```
+
+The bounded success result is three crashed workers, three recovered committed records
+per scenario, `next_offset=3`, one rebuilt index per scenario, positive truncation for
+the torn record and partial zstd batch, and no phantom records. This is process-crash
+and torn-file evidence; it is not a physical power-loss or damaged-filesystem claim.
+
+## Phase 12 Replication Surface
 
 The public broker remains protocol v5/storage v3. Phase 12 adds the packaged
 `boltstream-replication-sim` executable for an isolated static leader/follower pair.

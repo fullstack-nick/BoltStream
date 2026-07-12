@@ -1346,18 +1346,56 @@ live GCP proof path.
 
 ### Phase 13: Crash Recovery Proof
 
-Deliverables:
+#### Locked scope
 
-- Automated kill-during-write tests.
-- Recovery proof script.
-- Durable documentation of recovery behavior.
-- Tests for torn records, partial batches, and index rebuild.
+- Preserve public protocol version `5` and storage format `3`. Phase 13 proves the
+  existing recovery contract; it does not add a write-ahead log, consensus, follower
+  promotion, or a new durability mode.
+- Add a packaged `boltstream-recovery-proof` executable with a parent orchestrator and
+  a deliberately short-lived worker process. The worker writes three flushed seed
+  records, injects one deterministic incomplete storage mutation, and terminates with
+  `_Exit` so destructors and normal shutdown hooks cannot repair the files.
+- Cover exactly three failure points: a torn version-1 record, a partial version-2 zstd
+  batch, and a partial/stale index append. The parent must observe the worker's abnormal
+  exit, reopen the partition, and verify the complete logical contents rather than only
+  checking that startup succeeds.
+- Each scenario uses an isolated data directory and proves that recovery keeps exactly
+  the three committed seed records at offsets `0..2`, restores `next_offset=3`, removes
+  the incomplete log suffix when present, and rebuilds the index from the canonical log.
+- The proof is about BoltStream's process-crash and torn-file recovery contract after
+  bytes have reached the filesystem interface. It does not claim survival of unflushed
+  kernel page-cache data, disk-controller loss, filesystem corruption away from the
+  active tail, or physical host/power failure.
 
-Acceptance:
+#### Deliverables
 
-- Crash tests run from a clean checkout.
-- Recovered logs contain exactly the committed valid records.
-- README includes the recovery proof command and result summary.
+- The packaged crash worker/orchestrator and reusable recovery-verification logic.
+- Focused unit tests for torn records, partial batches, and stale/partial index rebuild.
+- `scripts/smoke-phase13.ps1` for clean-checkout local and CI execution.
+- `deployments/gcp/scripts/smoke-phase13-live.ps1` for isolated execution of the exact
+  CI-built Linux artifact as the unprivileged `boltstream` service account.
+- CI coverage on Linux Debug, Windows MSVC, Linux Release packaging, and the existing
+  ThreadSanitizer lane; README command/result documentation and `proof/phase-13.md`.
+
+#### Acceptance and release gate
+
+1. A clean checkout can configure and build the proof executable plus tests, run all
+   three crash scenarios, and run the focused test subset without pre-existing state.
+2. Every worker exits abnormally, every reopen reports an index rebuild, the two torn
+   log scenarios report positive truncation, and all three recover exactly the committed
+   records with no duplicate, partial, or phantom offsets.
+3. The runtime implementation is committed and pushed to `origin/main`; all required
+   GitHub Actions jobs are green and the Linux package from that exact commit contains
+   `boltstream-recovery-proof`.
+4. That exact artifact is deployed through the checked-in GCP deploy path. `/version`
+   matches its Git SHA with protocol `5` and storage format `3`, and the live Phase 13
+   script proves all scenarios under isolated `/var/lib/boltstream/phase13-live` state.
+5. Live proof cleanup removes the isolated state and uploaded helper, leaves the normal
+   `boltstream.service` active and ready, and a final Terraform detailed-exit-code plan
+   returns `0` with no changes.
+6. README contains the recovery proof command and bounded result summary, while
+   `proof/phase-13.md` durably records local, CI, artifact, deploy, live simulation,
+   cleanup, service-health, and Terraform-drift evidence.
 
 ### Phase 14: Recruiter-Grade Polish
 
