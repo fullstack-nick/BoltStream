@@ -1,10 +1,11 @@
 # BoltStream Protocol
 
-BoltStream broker/client traffic uses a custom binary TCP protocol. Protocol version
-`4` validates framed requests, preserves correlation ids, supports explicit topic
-creation, multi-partition produce/fetch, durable consumer offset commits, long-poll
-fetch, retryable overload responses, coordinated consumer groups, retention, and
-topic lifecycle operations.
+BoltStream broker/client traffic uses a custom binary TCP protocol. The current
+protocol version is `5`; the broker also accepts version `4` clients. Both versions
+validate framed requests, preserve correlation ids, and support topic administration,
+multi-partition produce/fetch, durable offsets, long polling, coordinated consumer
+groups, retention, and structured errors. Version `5` adds codec negotiation,
+producer-compressed record batches, and compressed fetch pass-through.
 
 ## Frame Header
 
@@ -13,12 +14,12 @@ order.
 
 ```text
 uint32 magic          0x42535452 ("BSTR")
-uint16 version        4
+uint16 version        4 or 5
 uint16 frame_type
 uint32 header_bytes   32
 uint32 payload_bytes
 uint64 correlation_id
-uint32 flags          0 in protocol version 4
+uint32 flags          0
 uint32 header_crc32   CRC32 over the first 28 header bytes
 ```
 
@@ -66,6 +67,8 @@ The broker enforces `--max-frame-bytes`, defaulting to `1048576`. The limit incl
 | 35 | `DescribeGroupResponse` |
 | 36 | `ResetGroupOffsetRequest` |
 | 37 | `ResetGroupOffsetResponse` |
+| 38 | `ProduceBatchRequest` (version 5) |
+| 39 | `ProduceBatchResponse` (version 5) |
 
 The broker accepts `HealthRequest`, `MetadataRequest`, `CreateTopicRequest`,
 `ProduceRequest`, `FetchRequest`, `OffsetCommitRequest`, coordinated group
@@ -87,12 +90,14 @@ Payloads:
 
 - `HealthRequest`: empty.
 - `HealthResponse`: `string status`, `string detail`.
-- `MetadataRequest`: empty.
-- `MetadataResponse`: `uint32 topic_count`, then repeated `string topic`, `uint16 partition`, `uint64 next_offset`.
+- `MetadataRequest`: empty in version 4; `uint32 supported_codecs` in version 5.
+- `MetadataResponse`: `uint32 topic_count`, then repeated `string topic`, `uint16 partition`, `uint64 next_offset`; version 5 appends `uint32 supported_codecs`, where bit `0` is `none` and bit `1` is `zstd`.
 - `CreateTopicRequest`: `string topic`, `uint16 partition_count`.
 - `CreateTopicResponse`: `string topic`, `uint16 partition_count`, `string status`.
 - `ProduceRequest`: `string topic`, `bytes key`, `bytes message`.
 - `ProduceResponse`: `string topic`, `uint16 partition`, `uint64 offset`, `uint64 next_offset`, `uint32 encoded_bytes`.
+- `ProduceBatchRequest` (version 5): `string topic`, `uint16 partition`, `uint16 codec`, `uint32 record_count`, `uint32 uncompressed_bytes`, `bytes encoded_records`.
+- `ProduceBatchResponse` (version 5): `string topic`, `uint16 partition`, `uint64 base_offset`, `uint64 next_offset`, `uint32 record_count`, `uint32 logical_bytes`, `uint32 encoded_bytes`, `uint32 stored_bytes`.
 - `FetchRequest`: `string topic`, `uint16 partition`, `string from`, `string group`, `uint32 max_wait_ms`.
 - `FetchResponse`: `string topic`, `uint16 partition`, `uint64 from_offset`, `uint64 next_offset`, `uint32 record_count`, then repeated `uint64 offset`, `uint64 timestamp_unix_ns`, `bytes key`, `bytes message`, `uint32 encoded_bytes`.
 - `AuthRequest`: `string token`.
@@ -122,6 +127,15 @@ Payloads:
 - `ResetGroupOffsetRequest`: `string group`, `string topic`, `uint16 partition`, `string to`; `to` is `beginning`, `latest`, or an unsigned offset.
 - `ResetGroupOffsetResponse`: `string group`, `string topic`, `uint16 partition`, `uint64 next_offset`, `string status`.
 - `ErrorResponse`: `uint32 error_code`, `string message`.
+
+The version-5 batch record set begins with `uint32 record_count`, followed by repeated
+`bytes key`, `bytes message`. Codec `0` stores the record set directly; codec `1`
+stores a zstd frame. The declared record count and uncompressed length are validated
+before append. A version-5 metadata exchange advertises fetch codecs; when both sides
+support the stored codec, a compressed fetch uses the normal `FetchResponse` type with
+the record-count field set to `0xffffffff`, followed by `uint16 codec`, `uint64
+timestamp_unix_ns`, `uint32 record_count`, `uint32 uncompressed_bytes`, and `bytes
+encoded_records`. Version-4 clients always receive ordinary decoded records.
 
 Topic descriptions encode `string topic`, `uint16 partition_count`, `uint64 log_bytes`,
 `uint32 partition_description_count`, then repeated `uint16 partition`,
@@ -175,6 +189,8 @@ group for the same `(group, topic)` has active members.
 | 18 | `stale_member` |
 | 19 | `offset_out_of_range` |
 | 20 | `group_active` |
+| 21 | `unsupported_codec` |
+| 22 | `invalid_batch` |
 
 Malformed or unsafe frames receive a structured `ErrorResponse` when possible and then
 the broker closes the connection. Valid but unsupported operations keep the connection
@@ -196,7 +212,9 @@ true` in retryable error JSON and exit with code `5`.
 
 ## CLI Behavior
 
-The producer and consumer CLIs use the same C++ async client library as other clients:
+The producer and consumer CLIs use the same C++ async client library as other clients.
+The zero-dependency Python reference client under `clients/python/` demonstrates that
+the version-4-compatible subset interoperates with the version-5 broker:
 
 ```powershell
 .\build\windows-gcc-debug\boltstream-admin.exe topics create `

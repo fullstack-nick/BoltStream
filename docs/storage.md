@@ -1,10 +1,10 @@
 # BoltStream Storage
 
-Storage format version `2` is a durable multi-partition, append-only log with
-manifest-backed topic metadata, retention-aware low watermarks, and consumer group
-offset logs.
-Phase 8 uses this storage path for broker topic lifecycle, retention, fetch, and
-consumer group offset reset commands.
+Storage format version `3` is a durable multi-partition, append-only log with
+manifest-backed topic metadata, retention-aware low watermarks, consumer group offset
+logs, and mixed version-1 record/version-2 batch entries. Existing format-2 data remains
+readable; enabling compressed writes creates format-3 data that requires the current
+binary or a pre-enable snapshot for rollback.
 `boltstream-logtool` remains available for direct inspection and recovery checks.
 
 ## Directory Layout
@@ -27,7 +27,7 @@ data/
 
 Topic names and consumer group names must match `[A-Za-z0-9._-]+` and must not
 be `.` or `..`. Topics are created explicitly with an immutable partition count.
-Manifestless Phase 4 topics are imported as single-partition topics during broker
+Legacy manifestless topics are imported as single-partition topics during broker
 startup and receive a `manifest.json`.
 
 Segment names use the segment base offset as a zero-padded 20-digit decimal
@@ -72,12 +72,39 @@ uint32 record_bytes
 The index is an acceleration structure only. If an index is missing or stale,
 recovery rewrites it from the log.
 
+## Batch Format
+
+Version-2 batch entries coexist with version-1 records in the same segment. All fields
+are big-endian.
+
+```text
+uint32 batch_bytes
+uint16 batch_version       // 2
+uint16 flags               // 0
+uint16 codec               // 0 none, 1 zstd
+uint16 reserved            // 0
+uint64 base_offset
+uint64 timestamp_unix_ns
+uint32 record_count
+uint32 uncompressed_bytes
+uint32 encoded_bytes
+bytes  encoded_record_set
+uint32 batch_crc32
+```
+
+The CRC covers the batch body from `batch_version` through the encoded record set. The
+uncompressed record set contains its own count followed by length-prefixed key/value
+pairs. Offsets are implicit and contiguous from `base_offset`; `next_offset` is
+`base_offset + record_count`. The broker validates the codec, lengths, record count,
+decompressed size, and CRC before exposing a batch.
+
 ## Recovery
 
-Opening a partition scans segment files in base-offset order. Recovery stops at
-the first incomplete record, invalid record, or CRC mismatch, truncates the
-segment from that byte onward, deletes later segments if necessary, rebuilds
-indexes, and sets `next_offset` to one past the last valid recovered record.
+Opening a partition scans segment files in base-offset order and decodes each entry by
+its version. Recovery stops at the first incomplete record or batch, invalid header,
+decompression failure, or CRC mismatch; it truncates the segment from that byte onward,
+deletes later segments if necessary, rebuilds indexes, and sets `next_offset` to one
+past the last valid recovered record or batch member.
 
 Broker startup reads each topic manifest, opens all configured partition logs,
 rebuilds indexes as needed, imports legacy manifestless `partition-000000` topics,
@@ -129,8 +156,13 @@ runs at startup, after appends, on the periodic broker timer, and on explicit
   --host 127.0.0.1 --port 9000 --topic trades
 ```
 
-For a repeatable local corruption/recovery check:
+For deterministic process-crash recovery evidence covering a torn record, partial zstd
+batch, and stale index:
 
 ```powershell
-.\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
+.\scripts\smoke-phase13.ps1 -BuildDir build/windows-gcc-debug
 ```
+
+This proves recovery from deliberately incomplete filesystem mutations after committed
+seed writes. It does not claim survival of unflushed page-cache data, physical power
+loss, unrelated filesystem corruption, or disk/controller failure.

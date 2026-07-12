@@ -1,213 +1,217 @@
 # BoltStream
 
-BoltStream is a C++20 low-latency event streaming engine: a Kafka-inspired broker built from scratch to demonstrate Linux networking, durable storage, concurrency, testing, performance measurement, and cloud-native deployment.
+[![CI](https://github.com/fullstack-nick/BoltStream/actions/workflows/ci.yml/badge.svg)](https://github.com/fullstack-nick/BoltStream/actions/workflows/ci.yml)
 
-Phase 13 adds deterministic process-crash proof for torn records, partial compressed
-batches, and stale indexes. Phase 12 added a two-broker leader/follower simulator with
-restart-safe catch-up, leader/all acknowledgement modes, and replication lag metrics.
-Phase 11 added protocol-v5 `none`/`zstd` capability negotiation, producer-compressed
-record batches, mixed-format durable recovery, and zero-recompression compressed
-fetch pass-through while retaining protocol-v4 and storage-v2 readability.
+BoltStream is a C++20 event-streaming broker built from first principles: a versioned
+binary TCP protocol, asynchronous networking, partitioned append-only logs, consumer
+groups, bounded backpressure, zstd batches, Prometheus observability, deterministic
+recovery testing, and an exact-artifact GCP deployment.
 
-## Current Phase 13 Surface
+It is deliberately smaller than Kafka and explicit about its boundaries. Replication is
+an isolated leader/follower simulator—not consensus or automatic failover—and crash
+testing proves recovery from torn tail writes, not physical power-loss durability.
 
-The public broker remains protocol v5/storage v3. The packaged
-`boltstream-recovery-proof` executable starts a worker process for each fault point,
-writes three flushed committed records, injects an incomplete log or index mutation,
-and terminates the worker with `_Exit`. The parent requires the abnormal exit, reopens
-the partition, and proves exact logical records, offsets, tail truncation, and canonical
-index rebuild.
+## Architecture
 
-Run the complete local crash proof from a clean checkout with:
-
-```powershell
-./scripts/smoke-phase13.ps1
+```mermaid
+flowchart LR
+    P["C++ / Python producers"] -->|"protocol v5 TCP :9000"| B["Async broker"]
+    C["C++ / Python consumers"] -->|"fetch, groups, commits"| B
+    A["Admin CLI"] -->|"topics, retention, offsets"| B
+    B --> Q["Bounded partition queues"]
+    Q --> L["Segmented append-only logs"]
+    L --> I["Rebuilt indexes"]
+    B --> O["Admin HTTP :9100"]
+    O --> M["Prometheus"]
+    M --> G["Grafana + alerts"]
+    T["Terraform + SSH"] --> V["GCP VM + systemd"]
+    V --> B
 ```
 
-The bounded success result is three crashed workers, three recovered committed records
-per scenario, `next_offset=3`, one rebuilt index per scenario, positive truncation for
-the torn record and partial zstd batch, and no phantom records. This is process-crash
-and torn-file evidence; it is not a physical power-loss or damaged-filesystem claim.
+The broker keeps the data path compact: Boost.Asio sessions validate frames and
+correlation IDs, bounded queues serialize partition appends, CRC-protected segments
+store records or compressed batches, and indexes are treated as rebuildable
+accelerators. The admin listener remains loopback-only in the cloud deployment.
 
-## Phase 12 Replication Surface
+## What It Demonstrates
 
-The public broker remains protocol v5/storage v3. Phase 12 adds the packaged
-`boltstream-replication-sim` executable for an isolated static leader/follower pair.
-It copies canonical stored batches, reports bounded Prometheus lag/watermark metrics,
-supports leader/all acknowledgement simulation, and resumes from the follower's
-recovered offset after reopen. It deliberately does not claim elections, failover, or
-distributed consensus.
+- C++20 with CMake/Ninja builds on Linux, MSVC, GCC, and Clang.
+- A custom big-endian TCP protocol with CRC-checked headers, structured errors,
+  authentication, capability negotiation, correlation IDs, and bounded frames.
+- Durable multi-partition logs, segment rolling, retention, low watermarks, offset
+  recovery, mixed uncompressed/zstd entries, and deterministic tail repair.
+- Single and coordinated consumers with committed offsets, deterministic assignment,
+  heartbeats, generation fencing, and long-poll fetch.
+- Backpressure through bounded append queues, waiter limits, request limits, and
+  retryable overload responses.
+- Structured JSON logs, Prometheus metrics, Grafana provisioning, alert tests, health
+  endpoints, build identity, and filesystem-capacity reporting.
+- GoogleTest, ThreadSanitizer, cross-platform CI, reproducible packages, benchmark
+  publication checks, Docker Compose, Terraform, SSH, and systemd operations.
 
-Run the local proof with:
+## Five-Minute Docker Demo
+
+Requirements: Docker Engine with Compose and PowerShell 7 (for the optional checks).
 
 ```powershell
-./scripts/smoke-phase12.ps1 -BuildDir build
+git clone https://github.com/fullstack-nick/BoltStream.git
+cd BoltStream
+docker compose up --build -d
+docker compose ps -a
+curl.exe -fsS http://127.0.0.1:9100/health/ready
+curl.exe -fsS http://127.0.0.1:9100/version
+curl.exe -fsS http://127.0.0.1:9090/api/v1/query?query=boltstream_ready
+curl.exe -fsS http://127.0.0.1:3000/api/health
 ```
 
-## Phase 11 Compression Surface
+Compose creates a topic, produces 25 records, consumes and commits 10, leaves visible
+consumer lag, scrapes the broker with Prometheus, and provisions the `BoltStream
+Operations` Grafana dashboard. Broker, admin, Prometheus, and Grafana ports bind only to
+loopback. Open Grafana at `http://127.0.0.1:3000`, then clean up with:
 
-- `boltstream-server` opens broker TCP port `9000`.
-- Admin HTTP listens on `127.0.0.1:9100`.
-- `GET /health/live` reports process liveness.
-- `GET /health/ready` reports data-directory readiness.
-- `GET /version` reports service name, Git SHA, build type, compiler, protocol version `5`, storage format version `3`, and startup time.
-- `GET /metrics` exposes Prometheus text `0.0.4` for traffic, latency, connections,
-  queues, storage, consumer lag, retention, recovery, and filesystem capacity.
-- `--config`, `--check-config`, and `--print-effective-config` provide strict YAML
-  configuration with CLI overrides and secret-free effective output.
-- Broker TCP port `9000` accepts versioned binary frames with correlation ids and structured error responses.
-- `boltstream-admin topics create` creates topics with an immutable partition count before produce.
-- `boltstream-admin topics list|describe|delete` inspects and safely deletes topics through the broker.
-- `boltstream-admin retention run` applies broker retention policy and reports deleted segments/bytes.
-- `boltstream-admin groups describe|reset-offset` inspects and resets inactive group offsets.
-- `boltstream-producer` appends durable records through the broker and prints assigned topic, partition, offset, and next offset.
-- `boltstream-producer --batch-records 32 --compression zstd` compresses once in the
-  client; the broker validates and stores the exact zstd payload.
-- `boltstream-consumer` fetches durable records from `beginning`, `latest`, `committed`, or an explicit offset for a chosen partition.
-- `boltstream-consumer --group GROUP --commit` commits the returned partition `next_offset` to a durable group offset log.
-- `boltstream-consumer --coordinated --group GROUP --commit` joins a broker-managed group, receives automatic partition assignments, heartbeats, rejoins on rebalances, and commits offsets fenced by member generation.
-- Long-poll fetch is available with `boltstream-consumer --wait-ms MS`.
-- `boltstream-consumer --compression zstd` negotiates compressed fetch capability and
-  transparently decodes pass-through zstd batches.
-- Append queues are bounded per partition and return retryable `overloaded` errors instead of growing without limit.
-- Long-poll waiter state, broker sessions, frame sizes, fetch records, and fetch bytes are bounded by server options.
-- Segment retention is configurable by age and size. Retention deletes inactive complete segments and exposes retained low watermarks.
-- Fetching or committing retained-away offsets returns `offset_out_of_range`.
-- Broker runtime logs are structured JSON lines with build identity, component,
-  event names, correlation ids, error codes, retryable flags, queue/waiter state,
-  and request duration in microseconds.
-- `boltstream-logtool` remains available for direct append, read, and recovery inspection of durable records.
-- `BOLTSTREAM_BROKER_TOKEN` enables broker-protocol auth; local development may omit it, while GCP deploys require it.
-- `boltstream-bench` runs authenticated produce-throughput, acknowledged-latency,
-  and fetch-throughput workloads with JSON and Markdown export.
-- `boltstream-microbench` isolates protocol, append, batching, segment-roll, and
-  read-path costs with Google Benchmark.
+```powershell
+docker compose down -v
+```
 
-## Phase 10 Benchmark Results
+## Native Build and Test
 
-<!-- PHASE10_BENCHMARK_START -->
-
-Limited GCP `e2-micro` results for exact commit `14d225abe1d5` (two complete rounds for all profiles; a third for single-threaded and batched-writes). Measured recommendation: **batched-writes**.
-
-| Profile | Median records/s | Min | Max | CV | Median MiB/s | p50 (us) | p95 (us) | p99 (us) | max (us) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| single-threaded | 104 | 71 | 125 | 27.13% | 0.031 | 258644.424 | 741374.534 | 753321.145 | 1992654.750 |
-| worker-event-loops | 92 | 67 | 117 | 38.39% | 0.028 | 391006.978 | 746455.544 | 756699.619 | 1492236.219 |
-| batched-writes | 180 | 171 | 191 | 5.46% | 0.054 | 12962.789 | 239372.586 | 243553.735 | 970660.144 |
-
-See [docs/benchmarks.md](docs/benchmarks.md) for methodology, fetch results, dispersion, and the canonical JSON.
-
-<!-- PHASE10_BENCHMARK_END -->
-
-## Phase 11 Compression Smoke
-
-One native Windows GCC Debug functional pair (32 records, 260-byte deterministic
-payload, zstd level 3) produced the following storage result:
-
-| Codec | Logical bytes | Encoded bytes | Partition log bytes |
-| --- | ---: | ---: | ---: |
-| none | 8,580 | 8,580 | 8,624 |
-| zstd | 8,580 | 58 | 102 |
-
-This single sample validates the comparison and pass-through path; it is not a capacity
-or statistical performance claim. See [the Phase 11 compression smoke](docs/compression-benchmarks.md).
-Exact-SHA CI, artifact, isolated GCP, recovery, cleanup, and Terraform evidence is
-recorded in [the Phase 11 proof](proof/phase-11.md).
-
-## Native Windows Build
-
-The primary local development path is native CMake plus Ninja. The machine is configured with MSVC, MSYS2 UCRT GCC, LLVM Clang, CMake, Ninja, and Python 3.11.
+The fastest Windows path uses the checked-in GCC preset. MSVC and Clang presets are
+also available; Linux uses the equivalent `linux-gcc-debug` preset.
 
 ```powershell
 .\scripts\toolchain-check.ps1
 .\scripts\build.ps1 -Preset windows-gcc-debug
 .\scripts\test.ps1 -Preset windows-gcc-debug
-.\scripts\build.ps1 -Preset windows-msvc-debug
-.\scripts\build.ps1 -Preset windows-clang-debug
+.\scripts\smoke-polish.ps1 -Preset windows-gcc-debug -SkipBuild
 ```
 
-MSVC builds require the Visual Studio environment. The scripts call `vcvars64.bat` automatically for MSVC presets.
-
-## Linux Parity Build
-
-Docker remains the Linux parity path because GCP runs Linux.
+Run a broker manually:
 
 ```powershell
-docker build --target builder -t boltstream-builder .
-docker compose up --build -d
-docker compose ps -a
-curl.exe -fsS http://127.0.0.1:9090/api/v1/query?query=up
-curl.exe -fsS http://127.0.0.1:3000/api/health
+.\build\windows-gcc-debug\boltstream-server.exe `
+  --config .\config\boltstream.example.yaml `
+  --listen 127.0.0.1:9000 `
+  --admin-listen 127.0.0.1:9100 `
+  --data .\data
 ```
 
-The Compose demo creates a topic, produces 25 records, consumes and commits the
-first 10, leaves visible group lag, scrapes the broker with Prometheus, and
-provisions the `BoltStream Operations` dashboard in Grafana. Host ports `9000`,
-`9100`, `9090`, and `3000` bind to loopback only.
-
-## Local Server Smoke
+In another terminal, create a topic and exchange a record:
 
 ```powershell
-.\build\windows-gcc-debug\boltstream-server.exe --config .\config\boltstream.example.yaml --listen 127.0.0.1:9000 --admin-listen 127.0.0.1:9100 --data .\data
-curl.exe -fsS http://127.0.0.1:9100/health/live
-curl.exe -fsS http://127.0.0.1:9100/health/ready
-curl.exe -fsS http://127.0.0.1:9100/version
-curl.exe -fsS http://127.0.0.1:9100/metrics
 .\build\windows-gcc-debug\boltstream-admin.exe topics create --topic trades --partitions 3
-.\build\windows-gcc-debug\boltstream-admin.exe topics describe --topic trades
 .\build\windows-gcc-debug\boltstream-producer.exe --topic trades --key AAPL --message "AAPL,100,192.41"
 .\build\windows-gcc-debug\boltstream-consumer.exe --topic trades --partition 0 --from beginning
-.\build\windows-gcc-debug\boltstream-consumer.exe --topic trades --partition 0 --group dashboard --commit
-.\build\windows-gcc-debug\boltstream-consumer.exe --topic trades --group dashboard --commit --coordinated
-.\build\windows-gcc-debug\boltstream-admin.exe groups describe --group dashboard --topic trades
-.\build\windows-gcc-debug\boltstream-admin.exe retention run --topic trades
-.\build\windows-gcc-debug\boltstream-logtool.exe append --data .\data --topic trades --key AAPL --message "AAPL,100,192.41"
-.\build\windows-gcc-debug\boltstream-logtool.exe read --data .\data --topic trades --from 0 --max-records 10
+curl.exe -fsS http://127.0.0.1:9100/metrics
 ```
 
-Use `curl.exe` in PowerShell. Plain `curl` is a PowerShell alias.
-Producer output includes `partition`, `offset`, `next_offset`, and encoded byte size. Consumer output includes returned records, `next_offset`, and `committed_offset` when `--commit` is used.
+Use `curl.exe` in PowerShell because plain `curl` may be an alias. CLI commands emit
+structured JSON with partitions, offsets, resume offsets, and retryability where
+applicable.
 
-For a repeatable local smoke:
+## Python Interoperability
+
+The reference client is a single Python 3 file with no third-party packages. It uses
+the protocol-v4-compatible subset accepted by the v5 broker and validates frame size,
+magic, version, flags, header CRC, correlation ID, response type, and payload length.
+
+Against the Docker demo:
 
 ```powershell
-.\scripts\smoke-phase5.ps1 -Preset windows-gcc-debug
-.\scripts\smoke-phase6.ps1 -Preset windows-gcc-debug
-.\scripts\smoke-phase7.ps1 -Preset windows-gcc-debug
-.\scripts\smoke-phase8.ps1 -Preset windows-gcc-debug
-.\scripts\smoke-phase9.ps1 -Preset windows-gcc-debug
-.\scripts\smoke-phase4.ps1 -Preset windows-gcc-debug
-.\scripts\smoke-phase3.ps1 -Preset windows-gcc-debug
+$env:BOLTSTREAM_BROKER_TOKEN = "local-demo-token"
+python .\clients\python\boltstream_client.py demo --topic python-demo
+python -m unittest discover -s .\clients\python\tests -v
 ```
 
-See [docs/protocol.md](docs/protocol.md) for the binary frame layout and
-[docs/storage.md](docs/storage.md) for the durable log format.
+See the [Python client notes](clients/python/README.md) for its intentional scope.
+
+## Metrics Example
+
+`GET /metrics` returns Prometheus text format on the private admin listener. A healthy
+broker exposes build identity and readiness alongside request, latency, queue, storage,
+consumer-lag, retention, recovery, compression, replication-simulation, and filesystem
+metrics. Representative samples are:
+
+```text
+boltstream_build_info{git_sha="<12-char-sha>",build_type="Release",protocol_version="5",storage_format_version="3"} 1
+boltstream_ready 1
+boltstream_records_produced_total 25
+boltstream_consumer_lag_records{group="dashboard",topic="demo",partition="0"} 15
+boltstream_storage_available_bytes 123456789
+```
+
+Prometheus rules and tests live under `deployments/metrics/`; Grafana provisioning is
+under `deployments/grafana/`. The complete metric contract is documented in
+[operations](docs/operations.md).
+
+## Measured Performance
+
+These are limited `e2-micro` results for commit `14d225abe1d5`, based on two complete
+rounds for every profile and a third round for single-threaded and batched writes. They
+show the effect of batching on this constrained VM; they are not general capacity
+claims.
+
+| Profile | Median records/s | Min | Max | CV | Median MiB/s | p50 (us) | p95 (us) | p99 (us) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| single-threaded | 104 | 71 | 125 | 27.13% | 0.031 | 258644.424 | 741374.534 | 753321.145 |
+| worker-event-loops | 92 | 67 | 117 | 38.39% | 0.028 | 391006.978 | 746455.544 | 756699.619 |
+| batched-writes | 180 | 171 | 191 | 5.46% | 0.054 | 12962.789 | 239372.586 | 243553.735 |
+
+Reproduce a short local run, or execute the full controlled workload:
+
+```powershell
+.\scripts\bench.ps1 -Preset windows-msvc-release -Quick
+.\scripts\bench.ps1 -Preset windows-msvc-release
+```
+
+Methodology, fetch results, raw-data locations, and publication rules are in the
+[benchmark report](docs/benchmarks.md). Compression size evidence is documented
+separately in [compression benchmarks](docs/compression-benchmarks.md).
+
+## Crash Recovery Proof
+
+`boltstream-recovery-proof` launches short-lived workers that flush three seed records,
+inject a torn record, partial zstd batch, or stale/partial index mutation, and terminate
+via `_Exit`. The parent requires an abnormal exit, reopens the partition, and verifies
+exact records at offsets `0..2`, `next_offset=3`, log truncation where applicable, and a
+canonical index rebuild.
+
+```powershell
+.\build\windows-gcc-debug\boltstream-recovery-proof.exe
+```
+
+This is process-crash and torn-tail evidence. It does not claim survival of unflushed
+kernel page-cache data, controller loss, unrelated filesystem damage, or physical host
+failure. Historical exact-artifact, CI, deployment, and live evidence remains under
+[`proof/`](proof/).
 
 ## GCP Deployment
 
-BoltStream is deployed to a dedicated GCP project:
+The checked-in cloud path intentionally favors control over abstraction:
 
-- Project: `boltstream-r7m5o9ld`
-- Account guard: `nickaccturk@gmail.com`
-- Region: `us-central1`
-- Zone: `us-central1-a`
-- Runtime: Terraform-managed `e2-micro` Compute Engine VM
-- Deploy control: direct SSH plus systemd
-- Data path: `/var/lib/boltstream`
+1. Terraform provisions an Ubuntu VM, persistent data disk, Secret Manager access, and
+   source-restricted firewall rules.
+2. The deploy script installs an exact Git-SHA package under
+   `/opt/boltstream/releases/<sha>` and moves the `current` symlink only after config
+   validation.
+3. systemd runs the broker as an unprivileged user with root-owned configuration;
+   health, version, logs, storage files, and Terraform drift are checked after deploy.
+4. The broker port is restricted to the operator CIDR. Admin and metrics stay on
+   localhost and are reached through a guarded SSH tunnel.
 
-See [docs/gcp.md](docs/gcp.md) and [docs/operations.md](docs/operations.md).
+Start with [the GCP runbook](docs/gcp.md). The repository's deployment helpers default
+to the maintained project/account guard; a reviewer deploying a fork should replace
+those checked-in defaults with their own account, project, billing account, state
+bucket, and operator CIDR before running any mutating command.
 
-## Phase Proof
+## Documentation
 
-Durable acceptance records live under `proof/`. Phase 1 is recorded in
-[proof/phase-1.md](proof/phase-1.md), and Phase 2 is recorded in
-[proof/phase-2.md](proof/phase-2.md). Phase 3 is recorded in
-[proof/phase-3.md](proof/phase-3.md) after local checks, GitHub push, CI artifact,
-GCP deploy, live storage calls, SSH log/data-file inspection, and runtime version
-verification pass. Phase 4 evidence is recorded in [proof/phase-4.md](proof/phase-4.md).
-Phase 5 evidence is recorded in [proof/phase-5.md](proof/phase-5.md). Phase 6 evidence
-is recorded in [proof/phase-6.md](proof/phase-6.md). Phase 7 evidence is recorded in
-[proof/phase-7.md](proof/phase-7.md) after live coordinated group proof. Phase 8 evidence
-is recorded in [proof/phase-8.md](proof/phase-8.md) after live retention and lifecycle proof.
-Phase 9 evidence is recorded in [proof/phase-9.md](proof/phase-9.md) after exact-artifact
-GCP metrics, operations-stack, structured-log, alert, dashboard, and cleanup proof.
+- [Binary protocol](docs/protocol.md)
+- [Storage format and recovery](docs/storage.md)
+- [Administration](docs/admin.md)
+- [Operations and metrics](docs/operations.md)
+- [Benchmark methodology](docs/benchmarks.md)
+- [GCP deployment](docs/gcp.md)
+- [Python reference client](clients/python/README.md)
+
+The authoritative engineering scope and compatibility decisions are kept in
+[`PLAN.md`](PLAN.md); durable execution evidence is kept separately under [`proof/`](proof/).

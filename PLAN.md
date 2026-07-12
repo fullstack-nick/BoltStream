@@ -1399,19 +1399,70 @@ live GCP proof path.
 
 ### Phase 14: Recruiter-Grade Polish
 
-Deliverables:
+#### Locked boundary
 
-- README with architecture diagram, quickstart, demo commands, metrics example, benchmark table, and recovery proof.
-- Protocol and storage docs.
-- Docker demo.
-- GCP deployment docs and live proof docs.
-- CI badge.
-- Small interoperability client in Python.
+- This work polishes and proves the existing protocol-v5/storage-v3 product surface. It
+  does not add broker semantics, change wire/storage compatibility, introduce another
+  deployment platform, or make new durability, replication, or performance claims.
+- `README.md` becomes a product and reviewer document. It must not describe the
+  repository as a sequence of development phases or stages; chronological engineering
+  evidence remains available under `proof/` without dominating the product narrative.
+- The existing Docker Compose stack remains the canonical one-command demo, and the
+  existing Terraform plus direct SSH/systemd path remains the canonical GCP deployment.
+- The interoperability client uses only the Python standard library and intentionally
+  targets the uncompressed protocol-v4-compatible subset of the v5 broker: health,
+  authentication, topic creation, single-record produce, and fetch. Compression,
+  coordinated groups, lifecycle administration, and retries remain C++ client surfaces.
 
-Acceptance:
+#### Deliverables
 
-- A reviewer can clone, build, run locally, deploy to GCP with documented Terraform/SSH steps, produce, consume, inspect metrics, run tests, and reproduce a benchmark without private setup beyond their own GCP project credentials.
-- The project clearly communicates C++20, Linux, networking, concurrency, storage, testing, performance, and production habits.
+1. Rewrite `README.md` around the product: CI badge, concise value proposition,
+   architecture diagram, capability summary, Docker quickstart, native build and demo,
+   Python interoperability example, metrics sample, measured benchmark table, crash
+   recovery result, GCP deployment path, testing commands, and focused documentation
+   links. Remove all phase/stage terminology from that file.
+2. Refresh `docs/protocol.md` and `docs/storage.md` so their headline versions and
+   compatibility descriptions match protocol `5` and storage format `3`, including
+   codec negotiation, batch frame types, mixed record/batch storage, recovery, and the
+   limits of the replication and crash-proof tools.
+3. Add `clients/python/boltstream_client.py`, a documented, zero-dependency reference
+   client and CLI with strict frame length, magic, version, flags, CRC, correlation-id,
+   response-type, and payload validation. It emits JSON for `health`, `create-topic`,
+   `produce`, `fetch`, and an end-to-end `demo` command.
+4. Add Python unit tests for framing, CRC rejection, correlation validation, payload
+   decoding, and broker error propagation, plus `scripts/smoke-polish.ps1` to start an
+   authenticated real broker and prove create/produce/fetch interoperability.
+5. Run the Python unit tests and live interoperability smoke in Linux Debug CI after
+   the C++ build. Preserve the existing cross-platform, sanitizer, packaging,
+   benchmark-publication, operations-asset, Docker, and GCP proof paths.
+
+#### Implementation sequence
+
+1. Lock this boundary and reconcile all reviewer-facing version statements with the
+   actual protocol/storage constants.
+2. Implement and unit-test the Python frame/payload codec before wiring its CLI.
+3. Add the authenticated real-broker smoke and CI coverage.
+4. Rewrite the README only after commands, outputs, benchmark evidence, and links are
+   verified against the repository.
+5. Run documentation terminology/link checks, Python tests, the live client smoke, the
+   native C++ test suite, and Docker Compose configuration validation; review the final
+   diff for private or machine-specific setup.
+
+#### Acceptance
+
+- `README.md` contains no case-insensitive occurrence of `phase` or `stage`, its badge
+  targets the repository's real `ci.yml`, and every local link resolves.
+- A reviewer with Docker can bring up the broker, Prometheus, and Grafana using the
+  checked-in Compose file; a native reviewer can build/test with the documented CMake
+  presets and run the same broker protocol locally.
+- Python 3 runs the reference-client unit suite with no third-party packages, and the
+  authenticated live smoke creates a topic, produces one record, fetches it back with
+  the expected key/value and offsets, and cleans up its temporary broker state.
+- Protocol and storage documentation match `kProtocolVersion == 5` and storage format
+  `3`, while compatibility and evidence statements remain bounded and reproducible.
+- The project clearly demonstrates C++20, TCP framing, asynchronous/concurrent request
+  handling, append-only storage and recovery, tests/sanitizers, measured performance,
+  observability, containers, Terraform, systemd, and exact-artifact operational habits.
 
 ## Repository Structure
 

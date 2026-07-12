@@ -55,6 +55,14 @@ jobs:
         if: matrix.build_type == 'Debug'
         run: pwsh ./scripts/format.ps1
 
+      - name: Python reference client unit tests
+        if: matrix.build_type == 'Debug'
+        run: python -m unittest discover -s clients/python/tests -v
+
+      - name: Python reference client interoperability smoke
+        if: matrix.build_type == 'Debug'
+        run: pwsh ./scripts/smoke-polish.ps1 -Preset linux-gcc-debug -SkipBuild
+
       - name: Phase 10 benchmark smoke
         if: matrix.build_type == 'Debug'
         run: pwsh ./scripts/smoke-phase10.ps1 -Preset linux-gcc-debug -SkipBuild
